@@ -101,8 +101,7 @@ CREATE TABLE chunks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     doc_id UUID NOT NULL REFERENCES documents(id),
     text TEXT NOT NULL,
-    language TEXT,
-    embedding VECTOR(768)           -- or use JSONB if you're not using pgvector
+    language TEXT      -- or use JSONB if you're not using pgvector
 );
 
 -- ======================
@@ -126,8 +125,8 @@ drop table if exists sessions cascade;
 CREATE TABLE sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id),
-    start TIMESTAMP DEFAULT NOW(),
-    end TIMESTAMP,
+    start_time TIMESTAMP DEFAULT NOW(),
+    end_time TIMESTAMP,
     queries INT DEFAULT 0,
     tokens INT DEFAULT 0,
     seconds INT DEFAULT 0,

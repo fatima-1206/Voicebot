@@ -24,14 +24,17 @@ import json
 from langchain_community.document_loaders import WikipediaLoader
 from datasets import load_dataset
 from langchain_core.documents import Document
-from scraper import crawl_website, save_to_json
+from backend.rag.scraper import crawl_website, save_to_json
 
 
+VECSTORE_PATH = "backend/rag/vector_stores/faiss_index"
+config_path = "config.json"
+cache_file = "backend/rag/cache/cached_kb.pkl"
 
-with open("cli_app/config.json", "r") as f:
+with open(config_path, "r") as f:
     config = json.load(f)
 
-folder_path = "cli_app/knowledge_base"
+folder_path = "backend/rag/knowledge_base"
 all_documents = []
 
 embedding_model_name = "intfloat/multilingual-e5-base"
@@ -185,26 +188,44 @@ def load_documents():
     db_initialized = True
     print(f"Total documents loaded (all sources): {len(all_documents)}")
 
+
+
+def load_vectorstore():
+    if os.path.exists(os.path.join(VECSTORE_PATH, "index.faiss")):
+        print("📂 Loading FAISS vector store from disk...")
+        return FAISS.load_local(VECSTORE_PATH, embeddings)
+    else:
+        print("🚫 FAISS index not found, constructing a new one...")
+        return None
+
+
+
 def construct_retrievers():
     """
     Construct the retrievers for the loaded documents.
     This function initializes the FAISS and BM25 retrievers.
     """
     global db_initialized, faiss_db, hybrid_retriever
-    if db_initialized:
-        print("Retrievers already constructed. Skipping.")
-        return faiss_db, bm25_retriever, faiss_retriever
 
-    load_documents()
+    faiss_db = load_vectorstore()
     
-    if not all_documents:
-        print("No documents loaded. Cannot construct retrievers.")
-        return None, None, None
+    if faiss_db:
+        print("FAISS vector store loaded from disk.")
+    else:
+        if db_initialized:
+            print("Retrievers already constructed. Skipping.")
+            return faiss_db, bm25_retriever, faiss_retriever
 
-    # Step 2: Create FAISS vector store
-    print("Creating FAISS vector store...")
-    faiss_db = FAISS.from_documents(all_documents, embeddings)
-    print("FAISS vector store created successfully.")
+        load_documents()
+        
+        if not all_documents:
+            print("No documents loaded. Cannot construct retrievers.")
+            return None, None, None
+
+        # Step 2: Create FAISS vector store
+        print("Creating FAISS vector store...")
+        faiss_db = FAISS.from_documents(all_documents, embeddings)
+        print("FAISS vector store created successfully.")
 
     # Step 2.1: Create FAISS retriever
     print("Creating FAISS retriever...")
@@ -227,7 +248,14 @@ def construct_retrievers():
     db_initialized = True
     print("Retrievers constructed successfully.")
     unload_documents_and_embeddings(clear_faiss=False)  # Clear documents and embeddings after retrievers are created
+    
     return faiss_db, hybrid_retriever
+
+def save_vectorstore(faiss_db):
+    if not os.path.exists(VECSTORE_PATH):
+        os.makedirs(VECSTORE_PATH)
+    faiss_db.save_local(VECSTORE_PATH)
+    print(f"🔐 FAISS vector store saved to {VECSTORE_PATH}")
 
 def get_folder_hash():
     """Get hash of all files in knowledge base to detect changes"""
@@ -255,8 +283,7 @@ def save_documents_cache():
         "timestamp": datetime.now().isoformat(),
         "total_docs": len(all_documents)
     }
-    cache_file = "cli_app/cache/cached_kb.pkl"
-    
+  
     try:
         with open(cache_file, 'wb') as f:
             pickle.dump(cache_data, f)
@@ -267,8 +294,7 @@ def save_documents_cache():
 
 def load_documents_cache():
     """Load documents from cache if valid"""
-    cache_file = "cli_app/cache/cached_kb.pkl"
-
+  
     if not os.path.exists(cache_file):
         print("No cache file found")
         return False
@@ -326,12 +352,9 @@ def get_retrievers():
 
 def clear_cache():
     """Clear the documents cache file"""
-    cache_file = "cli_app/cache/cached_kb.pkl"
-
+  
     if os.path.exists(cache_file):
         os.remove(cache_file)
         print("Cache cleared")
     else:
         print("No cache file to clear")
-
-construct_retrievers()

@@ -193,7 +193,7 @@ def load_documents():
 def load_vectorstore():
     if os.path.exists(os.path.join(VECSTORE_PATH, "index.faiss")):
         print("📂 Loading FAISS vector store from disk...")
-        return FAISS.load_local(VECSTORE_PATH, embeddings)
+        return FAISS.load_local(VECSTORE_PATH, embeddings, allow_dangerous_deserialization=True)
     else:
         print("🚫 FAISS index not found, constructing a new one...")
         return None
@@ -227,6 +227,12 @@ def construct_retrievers():
         faiss_db = FAISS.from_documents(all_documents, embeddings)
         print("FAISS vector store created successfully.")
 
+    if not all_documents:
+        load_documents()
+        if not all_documents:
+            print("No documents loaded. Cannot construct retrievers.")
+            return None, None, None
+
     # Step 2.1: Create FAISS retriever
     print("Creating FAISS retriever...")
     faiss_retriever = faiss_db.as_retriever(search_type="similarity", search_kwargs={"k": 5})
@@ -244,6 +250,8 @@ def construct_retrievers():
     weights=[config["faissWeight"], config["bm25Weight"]]
     )
     print("Hybrid retriever created successfully.")
+
+    save_vectorstore(faiss_db)  # Save the FAISS vector store to disk
 
     db_initialized = True
     print("Retrievers constructed successfully.")

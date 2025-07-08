@@ -4,8 +4,8 @@ import os
 import json
 from urllib.parse import urljoin
 from langchain.schema import Document
-from langchain.vectorstores import FAISS
-from langchain.embeddings import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import OpenAIEmbeddings
 
 # Base URL of your university website
 BASE_URL = "https://www.nu.edu.pk/" 

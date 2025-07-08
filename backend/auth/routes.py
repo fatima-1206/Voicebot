@@ -54,6 +54,7 @@ def register_org(data: RegisterOrgRequest, db: Session = Depends(get_db)):
     })
     return TokenResponse(access_token=token)
 
+
 @router.post("/register-user", response_model=TokenResponse)
 def register_user(data: RegisterUserRequest, db: Session = Depends(get_db)):
     tenant = db.query(models.Tenant).filter_by(id=data.tenant_id).first()
@@ -80,6 +81,47 @@ def register_user(data: RegisterUserRequest, db: Session = Depends(get_db)):
         "is_admin": False
     })
     return TokenResponse(access_token=token)
+
+
+@router.post("/register-solo-user", response_model=TokenResponse)
+def register_org(data: RegisterSoloUserRequest, db: Session = Depends(get_db)):
+    if db.query(models.User).filter_by(email=data.email).first():
+        raise HTTPException(status_code=400, detail="Email already exists")
+    
+    # Create tenant
+    tenant_id = uuid4()
+
+    join_code = data.join_code or f"{data.fname.lower().replace(' ', '')}-{str(tenant_id)[:6]}"
+    join_code_hash = hash_password(join_code)
+
+    tenant = models.Tenant(
+        id=tenant_id,
+        name=data.tenant_name,
+        join_code_hash=join_code_hash
+    )
+    db.add(tenant)
+    db.flush()
+
+    # Create user
+    user = models.User(
+        id=uuid4(),
+        tenant_id=tenant.id,
+        fname=data.fname,
+        lname=data.lname,
+        email=data.email,
+        password_hash=hash_password(data.password),
+        is_admin=True
+    )
+    db.add(user)
+    db.commit()
+
+    token = create_access_token({
+        "user_id": str(user.id),
+        "tenant_id": str(user.tenant_id),
+        "is_admin": True
+    })
+    return TokenResponse(access_token=token)
+
 
 @router.post("/login", response_model=TokenResponse)
 def login(data: LoginRequest, db: Session = Depends(get_db)):

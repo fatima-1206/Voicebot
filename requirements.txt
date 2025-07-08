@@ -16,3 +16,47 @@ typing
 passlib
 # to run:
 # uvicorn backend.main:app --reload --log-level debug --use-colors
+
+
+
+protobuf 
+nemo_toolkit[asr]
+silero
+silero_vad
+librosa
+noisereduce
+pedalboard
+nltk
+spacy
+langchain
+python-docx
+unstructured
+langchain-community
+sounddevice
+soundfile
+ffmpeg 
+tqdm 
+hf_xet
+Numba 
+torch
+torchaudio
+fsspec==2024.6.1
+sentence-transformers
+# for gpu:
+faiss-gpu-cu12
+# for cpu:
+# faiss-cpu
+bm25
+rank_bm25
+pyttsx3
+faster-whisper
+requests
+edge-tts
+numpy<2.0
+asyncio
+cuda-python>=12.3
+langchain-huggingface
+datetime
+wikipedia
+huggingface_hub
+scraper

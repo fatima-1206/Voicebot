@@ -1,6 +1,7 @@
 python-dotenv
 pytest
 fastapi[standard]
+sqlmodel
 uvicorn
 psycopg2-binary
 sqlalchemy

@@ -1,7 +1,18 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
+from sqlalchemy.orm import Session
+from backend.db.connection import SessionLocal
+import backend.db.models  # makes sure models are registered
 
 app = FastAPI()
 
+# Dependency to get DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 @app.get("/")
-async def read_root():
-    return {"message": "Voicebot backend is running"}
+def root():
+    return {"msg": "SaaS voicebot backend live"}

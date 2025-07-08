@@ -10,3 +10,5 @@ uvicorn
 psycopg2-binary
 sqlalchemy
 python-dotenv
+# to run:
+# uvicorn backend.main:app --reload --log-level debug --use-colors

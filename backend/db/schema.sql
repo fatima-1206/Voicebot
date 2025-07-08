@@ -26,7 +26,10 @@ CREATE TABLE tenants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     billing_plan_id UUID REFERENCES billing_plans(id),
-    configs JSONB
+    configs JSONB,
+    join_code_hash TEXT UNIQUE,  -- hashed join code for tenant creation 
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
 );
 
 -- ======================
@@ -39,6 +42,7 @@ CREATE TABLE users (
     fname TEXT,
     lname TEXT,
     email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL, 
     dob DATE,
     gender TEXT,
     display_name TEXT,

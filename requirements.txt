@@ -1,7 +1,11 @@
 python-dotenv
 pytest
-fastapi
+fastapi[standard]
 uvicorn
 psycopg2-binary
 sqlalchemy
 asyncpg
+uvicorn
+psycopg2-binary
+sqlalchemy
+python-dotenv

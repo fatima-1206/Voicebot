@@ -3,12 +3,10 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 import os
 from dotenv import load_dotenv
-# load_dotenv("/home/genesys/voicebot/Voicebot/.env")
 load_dotenv()
 DATABASE_URL = os.getenv("DB_URL")
-print("🔌 DATABASE_URL =", repr(DATABASE_URL))
+print("DATABASE_URL =", repr(DATABASE_URL))
 
-print(f"Connecting to database at {DATABASE_URL}")
 
 engine = create_engine(DATABASE_URL)
 

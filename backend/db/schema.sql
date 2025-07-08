@@ -1,3 +1,4 @@
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- this is postgresql schema for a multi-tenant application with billing, rate limits, and usage tracking
 -- ======================

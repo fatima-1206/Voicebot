@@ -60,3 +60,4 @@ datetime
 wikipedia
 huggingface_hub
 scraper
+celery[redis]

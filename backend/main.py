@@ -6,9 +6,11 @@ from backend.db.setup import db_has_tables, run_sql_file  # 👈 add this
 import os
 from backend.auth.routes import router as auth_router
 from backend.rag.retrieverconstruction import construct_retrievers
-
+from backend.documents.routes import router as documents_router  # 👈 add this
 app = FastAPI()
 app.include_router(auth_router, prefix="/auth")
+app.include_router(documents_router, prefix="/documents")  # Add this
+
 # Dependency to get DB session
 def get_db():
     db = SessionLocal()

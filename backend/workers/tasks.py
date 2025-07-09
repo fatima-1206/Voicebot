@@ -21,6 +21,27 @@ def rerank_task(docs, query):
 @celery_app.task
 def tts_task(text, voice="default"):
     return synthesize_speech(text, voice=voice)
+
+@celery_app.task
+def process_uploaded_document(file_bytes, filename, doc_id, tenant_id):
+    """Process uploaded document - extract text, create chunks, etc."""
+    try:
+        # Add your document processing logic here
+        # For now, just simulate processing
+        print(f"Processing document {filename} for tenant {tenant_id}")
+        
+        # You would typically:
+        # 1. Extract text from the file
+        # 2. Split into chunks
+        # 3. Generate embeddings
+        # 4. Store in vector database
+        # 5. Update document status in DB
+        
+        return {"status": "processed", "doc_id": doc_id}
+    except Exception as e:
+        print(f"Error processing document: {e}")
+        return {"status": "error", "error": str(e)}
+
 # to run ---------------------------
 # celery -A backend.workers.celery_worker.celery_app worker --loglevel=info --concurrency=1 --hostname=voicebot@%h
 

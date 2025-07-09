@@ -31,7 +31,7 @@ def run_sql_file(filepath: str):
 
 if __name__ == "__main__":
     if db_has_tables():
-        print("✅ Database already initialized. No action taken.")
+        print("✅ Postgresql Database already initialized. No action taken.")
     else:
         print("⏳ No tables found. Initializing database...")
         run_sql_file(os.path.join(os.path.dirname(__file__), "schema.sql"))

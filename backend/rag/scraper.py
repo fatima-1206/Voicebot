@@ -14,7 +14,7 @@ scraped_docs = []
 
 # Keep track of visited URLs to avoid re-scraping
 visited_urls = set()
-scraped_data_file = "cli_app/scraped_docs.json"
+scraped_data_file = "backend/rag/scraped_docs.json"
 
 # Function to fetch page content
 def fetch_page(url):

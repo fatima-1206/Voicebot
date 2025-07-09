@@ -30,7 +30,7 @@ import csv
 
 splitter = TokenTextSplitter(chunk_size=256, chunk_overlap=64)
 
-
+csv_path = "backend/rag/knowledge_base/links.csv"
 VECSTORE_PATH = "backend/rag/vector_stores/faiss_index"
 config_path = "config.json"
 cache_file = "backend/rag/cache/cached_kb.pkl"
@@ -56,7 +56,7 @@ bm25_retriever = None
 # Keep track of visited URLs to avoid re-scraping
 visited_urls = set()
 
-def load_scraped_documents(start_url:str, excluded_sublinks:str, depth=-1, json_path = "cli_app/scraped_docs.json"):
+def load_scraped_documents(start_url:str, excluded_sublinks:str, depth=-1, json_path = "backend/rag/scraped_docs.json"):
     """
         Takes a url, crawls the website and saves all documents extracted from it to the json file
     """
@@ -72,7 +72,7 @@ def load_scraped_documents(start_url:str, excluded_sublinks:str, depth=-1, json_
 
         print(f"  -> Crawled and chunked {len(scraped_docs)} scraped web documents")
 
-def scrape_links_from_csv(csv_path="cli_app/knowledge_base/links.csv", json_path = "cli_app/scraped_docs.json"):
+def scrape_links_from_csv(csv_path=csv_path, json_path = "backend/rag/scraped_docs.json"):
     """
     for all the links in the CSV file, scrape the website and save the documents
     """

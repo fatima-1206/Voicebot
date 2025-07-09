@@ -208,3 +208,4 @@ __marimo__/
 backend/rag/cache/
 backend/rag/temp_audioFiles/
 backend/rag/vector_stores/
+backend/rag/scraped_docs.json

@@ -8,7 +8,6 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import OpenAIEmbeddings
 
 # Base URL of your university website
-BASE_URL = "https://www.nu.edu.pk/" 
 
 # Store scraped documents
 scraped_docs = []
@@ -29,19 +28,19 @@ def fetch_page(url):
 
 # Function to extract text from the HTML content of a page
 def extract_text_from_page(html):
-    soup = BeautifulSoup(html, 'html.parser')
+    soup = BeautifulSoup(html, 'html.parser', features="lxml")
     # Extract text from paragraphs and divs, ignoring scripts and styles
     texts = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'div'])
     content = " ".join([text.get_text(strip=True) for text in texts if text.get_text(strip=True)])
     return content
 
 # Function to crawl and scrape the website
-def crawl_website(start_url):
-    pages_not_to_visit =[
-        "faculty","employee", "list", "Downloads", "ScholarshipAwardees", "MedalHolders", ".docx"
-    ]
+def crawl_website(start_url:str, excluded_sublinks:str="", depth:int=-1):
+    pages_not_to_visit = []
+    if excluded_sublinks != "":
+        pages_not_to_visit = excluded = excluded_sublinks.split("|")
     pages_to_visit = [start_url]
-
+    print(f"Scraping {start_url} and sub pages...")
     while pages_to_visit:
         url = pages_to_visit.pop()
         
@@ -49,7 +48,7 @@ def crawl_website(start_url):
             continue
         
         visited_urls.add(url)
-        print(f"Scraping {url}...")
+
         
         html = fetch_page(url)
         if not html:
@@ -70,16 +69,18 @@ def crawl_website(start_url):
         for link in links:
             link_url = urljoin(url, link['href'])
             # Only add links from the same domain
-            if BASE_URL in link_url and link_url not in visited_urls:
+            if start_url in link_url and link_url not in visited_urls:
                 # check if there are some words in the url to filter out useless pages
                 if any(word.lower() in link_url.lower() for word in pages_not_to_visit):
                     continue
                 else:
                     pages_to_visit.append(link_url)
 
+    return scraped_docs
+
 # Function to save scraped documents to a JSON file
 def save_to_json(docs, filename=scraped_data_file):
-    with open(filename, 'w', encoding='utf-8') as f:
+    with open(filename, 'a', encoding='utf-8') as f:
         json.dump(docs, f, ensure_ascii=False, indent=4)
     print(f"Saved {len(docs)} documents to {filename}")
 
@@ -90,12 +91,3 @@ def store_in_faiss(docs):
     faiss_index.save_local("university_knowledge_base")
     print("Stored documents in FAISS.")
 
-
-
-
-# # Start crawling from the university website homepage
-# crawl_website(BASE_URL)
-
-# # After crawling and scraping, save the scraped documents to JSON
-# if scraped_docs:
-#     save_to_json(scraped_docs)  # Save_

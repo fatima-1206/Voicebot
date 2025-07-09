@@ -28,7 +28,7 @@ def fetch_page(url):
 
 # Function to extract text from the HTML content of a page
 def extract_text_from_page(html):
-    soup = BeautifulSoup(html, 'html.parser', features="lxml")
+    soup = BeautifulSoup(html, 'lxml')
     # Extract text from paragraphs and divs, ignoring scripts and styles
     texts = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'div'])
     content = " ".join([text.get_text(strip=True) for text in texts if text.get_text(strip=True)])

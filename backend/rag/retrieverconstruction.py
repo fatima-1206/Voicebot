@@ -25,6 +25,10 @@ from langchain_community.document_loaders import WikipediaLoader
 from datasets import load_dataset
 from langchain_core.documents import Document
 from backend.rag.scraper import crawl_website, save_to_json
+from langchain.text_splitter import TokenTextSplitter
+import csv
+
+splitter = TokenTextSplitter(chunk_size=256, chunk_overlap=64)
 
 
 VECSTORE_PATH = "backend/rag/vector_stores/faiss_index"
@@ -47,16 +51,31 @@ hybrid_retriever = None
 faiss_retriever = None
 bm25_retriever = None
 
-# Base URL of your university website
-BASE_URL = "https://www.nu.edu.pk/" 
 
-# Store scraped documents
-scraped_docs = []
 
 # Keep track of visited URLs to avoid re-scraping
 visited_urls = set()
 
-def load_scraped_documents(json_path="cli_app/scraped_docs.json"):
+def load_scraped_documents(start_url:str, excluded_sublinks:str, depth=-1, json_path = "cli_app/scraped_docs.json"):
+    """
+        Takes a url, crawls the website and saves all documents extracted from it to the json file
+    """
+    scraped_docs = crawl_website(start_url, excluded_sublinks, depth)
+    if scraped_docs:
+        save_to_json(scraped_docs, json_path)
+        for entry in scraped_docs:
+            chunks = splitter.split_text(entry["content"])
+            all_documents.extend([
+                Document(page_content=chunk, metadata={"source": "university_website", "url": entry["url"]})
+                for chunk in chunks
+            ])
+
+        print(f"  -> Crawled and chunked {len(scraped_docs)} scraped web documents")
+
+def scrape_links_from_csv(csv_path="cli_app/knowledge_base/links.csv", json_path = "cli_app/scraped_docs.json"):
+    """
+    for all the links in the CSV file, scrape the website and save the documents
+    """
     global all_documents
 
     if os.path.exists(json_path):
@@ -64,26 +83,31 @@ def load_scraped_documents(json_path="cli_app/scraped_docs.json"):
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         for entry in data:
-            all_documents.append(
-                Document(page_content=entry["content"], metadata={"source": "university_website", "url": entry["url"]})
-            )
+            chunks = splitter.split_text(entry["content"])
+            all_documents.extend([
+                Document(page_content=chunk, metadata={"source": "url", "url": entry["url"]})
+                for chunk in chunks
+            ])
+
+            
         print(f"  -> Loaded {len(data)} scraped web documents")
         return
 
+    # if the json file does not exist, start crawling
     print("Scraped data not found. Starting crawl...")
-    crawl_website(BASE_URL)
+    with open(csv_path, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            start_url = row["url"]
+            if row["depth"]:
+                d = int(row["depth"])
 
-    if scraped_docs:
-        save_to_json(scraped_docs, json_path)
-        for entry in scraped_docs:
-            all_documents.append(
-                Document(page_content=entry["content"], metadata={"source": "university_website", "url": entry["url"]})
-            )
-        print(f"  -> Crawled and loaded {len(scraped_docs)} scraped web documents")
-
+                load_scraped_documents(start_url=start_url, excluded_sublinks=row["excluded_sublinks"], depth=d)
+            else:
+                load_scraped_documents(start_url=start_url, excluded_sublinks=row["excluded_sublinks"])
 
 def load_documents():
-    global all_documents, db_initialized, BASE_URL
+    global all_documents, db_initialized
 
     if db_initialized:
         print("Database already initialized. Skipping document loading.")
@@ -124,19 +148,22 @@ def load_documents():
 
         try:
             documents = loader.load()
-            all_documents.extend(documents)
-            print(f"  -> Loaded {len(documents)} chunks from {filename}")
+            n_chunks = len(documents)
+            for doc in documents:
+                chunks = splitter.split_text(doc.page_content)
+                all_documents.extend([
+                    Document(page_content=chunk, metadata=doc.metadata)
+                    for chunk in chunks
+                ])
+                n_chunks = len(chunks)
+            print(f"  -> Loaded {n_chunks} chunks from {filename}")
         except Exception as e:
             print(f"  -> Error loading {filename}: {e}")
 
     print(f"Total local documents loaded: {len(all_documents)}")
     
-    load_scraped_documents()
-    print(f"Total local documents loaded after scraping {BASE_URL} : {len(all_documents)}")
-
-    BASE_URL = "https://isb.nu.edu.pk/"
-    load_scraped_documents()    
-    print(f"Total local documents loaded after scraping {BASE_URL} : {len(all_documents)}")
+    scrape_links_from_csv()
+    print(f"Total local documents loaded after scraping: {len(all_documents)}")
 
 
     # Wikipedia documents
@@ -189,7 +216,6 @@ def load_documents():
     print(f"Total documents loaded (all sources): {len(all_documents)}")
 
 
-
 def load_vectorstore():
     if os.path.exists(os.path.join(VECSTORE_PATH, "index.faiss")):
         print("📂 Loading FAISS vector store from disk...")
@@ -208,8 +234,8 @@ def construct_retrievers():
     global db_initialized, faiss_db, hybrid_retriever
 
     faiss_db = load_vectorstore()
-    
-    if faiss_db:
+    # the folder hash must be checked to make sure the faiss index is still valid
+    if faiss_db and load_documents_cache():
         print("FAISS vector store loaded from disk.")
     else:
         if db_initialized:

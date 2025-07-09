@@ -29,6 +29,7 @@ class Tenant(Base):
     name = Column(String, nullable=False)
     billing_plan_id = Column(UUID(as_uuid=True), ForeignKey("billing_plans.id"))
     configs = Column(JSONB)
+    join_code_hash = Column(String, nullable=False)  # ADD THIS LINE
 
 
 class User(Base):
@@ -38,6 +39,7 @@ class User(Base):
     fname = Column(String)
     lname = Column(String)
     email = Column(String, unique=True, nullable=False)
+    password_hash = Column(String, nullable=False)  # ADD THIS LINE
     dob = Column(Date)
     gender = Column(String)
     display_name = Column(String)

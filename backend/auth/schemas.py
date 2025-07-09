@@ -23,6 +23,8 @@ class RegisterSoloUserRequest(BaseModel):
     lname: str
     email: EmailStr
     password: str
+    tenant_name: Optional[str] = None  # Add this field
+    join_code: Optional[str] = None    # Add this field
 
 class LoginRequest(BaseModel):
     email: EmailStr

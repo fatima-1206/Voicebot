@@ -6,6 +6,7 @@ from ..db import models
 from .schemas import *
 from .utils import hash_password, verify_password
 from .jwt_ import create_access_token
+from fastapi.security import OAuth2PasswordBearer
 
 router = APIRouter()
 
@@ -84,19 +85,21 @@ def register_user(data: RegisterUserRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/register-solo-user", response_model=TokenResponse)
-def register_org(data: RegisterSoloUserRequest, db: Session = Depends(get_db)):
+def register_solo_user(data: RegisterSoloUserRequest, db: Session = Depends(get_db)):  # Fixed function name
     if db.query(models.User).filter_by(email=data.email).first():
         raise HTTPException(status_code=400, detail="Email already exists")
     
     # Create tenant
     tenant_id = uuid4()
-
+    
+    # Use provided tenant_name or create one from user's name
+    tenant_name = data.tenant_name or f"{data.fname}'s Workspace"
     join_code = data.join_code or f"{data.fname.lower().replace(' ', '')}-{str(tenant_id)[:6]}"
     join_code_hash = hash_password(join_code)
 
     tenant = models.Tenant(
         id=tenant_id,
-        name=data.tenant_name,
+        name=tenant_name,  # Fixed: use tenant_name variable
         join_code_hash=join_code_hash
     )
     db.add(tenant)

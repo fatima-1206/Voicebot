@@ -209,3 +209,15 @@ backend/rag/cache/
 backend/rag/temp_audioFiles/
 backend/rag/vector_stores/
 backend/rag/scraped_docs.json
+*.pid
+tmp/
+# Process files
+*.pid
+*.lock
+*.sock
+
+# Runtime directories  
+tmp/
+temp/
+run/
+var/run/

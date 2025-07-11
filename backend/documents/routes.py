@@ -25,8 +25,10 @@ async def upload_document(
     current_user: UserTokenData = Depends(get_current_user)
 ):
     # Validate file type
-    if not file.filename.endswith((".pdf", ".txt", ".docx", ".epub")):
-        raise HTTPException(status_code=400, detail="Unsupported file type")
+    # print stuff about the file:
+    print(f"Received file: {file.filename}, size: {file.size} bytes, content type: {file.content_type}")
+    # if not file.filename.endswith((".pdf", ".txt", ".docx", ".epub")):
+    #     raise HTTPException(status_code=400, detail="Unsupported file type")
 
     doc_id = uuid4()
     contents = await file.read()

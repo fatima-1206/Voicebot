@@ -51,8 +51,6 @@ hybrid_retriever = None
 faiss_retriever = None
 bm25_retriever = None
 
-
-
 # Keep track of visited URLs to avoid re-scraping
 visited_urls = set()
 

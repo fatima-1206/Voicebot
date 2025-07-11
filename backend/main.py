@@ -5,7 +5,6 @@ import backend.db.models  # makes sure models are registered
 from backend.db.setup import db_has_tables, run_sql_file  # 👈 add this
 import os
 from backend.auth.routes import router as auth_router
-from backend.rag.retrieverconstruction import construct_retrievers
 from backend.documents.routes import router as documents_router  # 👈 add this
 app = FastAPI()
 app.include_router(auth_router, prefix="/auth")
@@ -32,7 +31,4 @@ def init_db():
         print("⏳ No tables found. Initializing database...")
         run_sql_file(os.path.join(os.path.dirname(__file__), "db/schema.sql"))
 
-    try:
-        construct_retrievers()  # Ensure retrievers are constructed on startup
-    except Exception as e:
-        print(f"🚫 Failed to construct retrievers: {e}")
+   

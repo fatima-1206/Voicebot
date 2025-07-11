@@ -4,7 +4,6 @@
     The chunks made from the document will be added to the vector dtabase and the postgres database.
     When the vector database is constructed, all chunks in the postgres database will be added to the vector database.
 """
-from backend.rag.retrieverconstruction import faiss_db, hybrid_retriever, save_vectorstore, bm25_retriever
 from langchain_core.documents import Document as LC_Document
 from langchain.text_splitter import TokenTextSplitter
 from uuid import uuid4, UUID
@@ -90,8 +89,6 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         # Step 4: Add to FAISS vectorstore
         if not faiss_db:
             raise ValueError("FAISS vector store is not initialized.")
-        faiss_db.add_documents(chunks)
-        save_vectorstore(faiss_db)
 
         # Step 5: Re-create only the FAISS retriever to reflect the updated index
         faiss_retriever = faiss_db.as_retriever(search_type="similarity", search_kwargs={"k": 5})

@@ -11,7 +11,7 @@ NC='\033[0m' # No Color
 FASTAPI_PORT=8000
 FASTAPI_HOST="0.0.0.0"
 CELERY_WORKERS=1
-DEV_MODE=false
+DEV_MODE=true
 
 
 # Function to display help

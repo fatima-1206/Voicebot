@@ -7,6 +7,7 @@ from backend.db import models
 from backend.auth.jwt_ import get_current_user, UserTokenData
 from backend.workers.tasks import process_uploaded_document
 import os
+from backend.workers.tasks import update_document_visibility
 
 router = APIRouter()
 
@@ -150,6 +151,68 @@ def get_document_details(
             }
             for chunk in chunks[:5]  # Show first 5 chunks as preview
         ]
+    }
+
+
+# Add this new endpoint after your existing routes
+@router.patch("/{identifier}/visibility")
+async def update_document_visibility_endpoint(
+    identifier: str,
+    is_public: bool,
+    db: Session = Depends(get_db),
+    current_user: UserTokenData = Depends(get_current_user)
+):
+    """Update document visibility (public/private)"""
+    
+    # Find the document (same logic as get_document_details)
+    try:
+        from uuid import UUID
+        doc_uuid = UUID(identifier)
+        # Search by ID
+        document = db.query(models.Document).filter(
+            models.Document.id == doc_uuid,
+            models.Document.tenant_id == current_user.tenant_id
+        ).first()
+    except ValueError:
+        # If not a valid UUID, search by filename
+        document = db.query(models.Document).filter(
+            models.Document.filename == identifier,
+            models.Document.tenant_id == current_user.tenant_id
+        ).first()
+    
+    if not document:
+        raise HTTPException(status_code=404, detail=f"Document '{identifier}' not found")
+    
+    # Check if user has permission (document owner or admin)
+    if document.user_id != current_user.user_id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="You don't have permission to modify this document")
+    
+    # If the visibility is already the same, no need to process
+    if document.is_public == is_public:
+        return {
+            "message": f"Document '{document.filename}' is already {'public' if is_public else 'private'}",
+            "doc_id": str(document.id),
+            "filename": document.filename,
+            "is_public": is_public
+        }
+    
+    # Update the database immediately for quick response
+    document.is_public = is_public
+    db.commit()
+    
+    # Send to Celery for FAISS metadata update
+    update_document_visibility.delay(
+        doc_id=str(document.id),
+        is_public=is_public,
+        tenant_id=str(current_user.tenant_id)
+    )
+    
+    return {
+        "message": f"Document '{document.filename}' visibility updated to {'public' if is_public else 'private'}. Vector store is being updated in background.",
+        "doc_id": str(document.id),
+        "filename": document.filename,
+        "is_public": is_public,
+        "status": "updating_vector_store"
     }
 
 # @router.delete("/{doc_id}")

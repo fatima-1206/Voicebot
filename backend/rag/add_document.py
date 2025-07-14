@@ -4,7 +4,6 @@
     The chunks made from the document will be added to the vector dtabase and the postgres database.
     When the vector database is constructed, all chunks in the postgres database will be added to the vector database.
 """
-from backend.rag.retrieverconstruction import faiss_db, hybrid_retriever, save_vectorstore, bm25_retriever
 from langchain_core.documents import Document as LC_Document
 from langchain.text_splitter import TokenTextSplitter
 from uuid import uuid4, UUID
@@ -23,6 +22,7 @@ from langchain.retrievers import EnsembleRetriever
 from io import BytesIO
 import tempfile
 import json
+from celery import Celery
 
 # Import config for weights
 with open("config.json", "r") as f:
@@ -30,24 +30,37 @@ with open("config.json", "r") as f:
 
 splitter = TokenTextSplitter(chunk_size=256, chunk_overlap=64)
 
+celery_app = Celery('tasks', broker='redis://localhost:6379/0')
+db = None
 
+@celery_app.task(name='process_uploaded_document')
 def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public, db: Session):
     """
     Process an uploaded document and add it to both the vector database and PostgreSQL.
-    
-    Args:
-        file_bytes: The file content as bytes
-        filename: Original filename
-        doc_id: Document UUID (as string)
-        tenant_id: Tenant UUID (as string) 
-        user_id: User UUID (as string)
-        is_public: Boolean indicating if document is public
-        db: SQLAlchemy database session
     """
-    global faiss_db, hybrid_retriever, bm25_retriever
-    temp_path = None
+    temp_path = None  # Initialize at the top to avoid UnboundLocalError
     
     try:
+        print(f"🔄 Task started for document: {filename}")
+        
+        # Import and get fresh references to retrievers
+        from backend.rag import retrieverconstruction
+        
+        # Get or initialize retrievers
+        faiss_db, hybrid_retriever = retrieverconstruction.get_retrievers()
+        
+        if faiss_db is None:
+            print("🔧 FAISS not available, constructing retrievers...")
+            faiss_db, hybrid_retriever = retrieverconstruction.construct_retrievers()
+            if faiss_db is None:
+                raise ValueError("Failed to initialize FAISS vector store")
+        
+        print(f"✅ Retrieved FAISS DB: {faiss_db is not None}")
+        print(f"✅ Retrieved Hybrid Retriever: {hybrid_retriever is not None}")
+        
+        # Get BM25 retriever from the module
+        bm25_retriever = retrieverconstruction.bm25_retriever
+        
         # Convert string UUIDs to UUID objects
         doc_id = UUID(doc_id) if isinstance(doc_id, str) else doc_id
         tenant_id = UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
@@ -87,17 +100,22 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
                     })
                 )
 
+        print(f"📝 Created {len(chunks)} chunks from document")
+
         # Step 4: Add to FAISS vectorstore
-        if not faiss_db:
-            raise ValueError("FAISS vector store is not initialized.")
+        print(f"📝 Adding {len(chunks)} chunks to FAISS vector store...")
         faiss_db.add_documents(chunks)
-        save_vectorstore(faiss_db)
+        
+        # Save the updated vectorstore
+        retrieverconstruction.save_vectorstore(faiss_db)
+        print("✅ Chunks added to FAISS successfully")
 
         # Step 5: Re-create only the FAISS retriever to reflect the updated index
         faiss_retriever = faiss_db.as_retriever(search_type="similarity", search_kwargs={"k": 5})
 
-        # Step 6: Re-create hybrid retriever with UPDATED faiss_retriever + STATIC bm25_retriever
+        # Step 6: Re-create hybrid retriever
         if bm25_retriever is not None:
+            from langchain.retrievers import EnsembleRetriever
             hybrid_retriever = EnsembleRetriever(
                 retrievers=[faiss_retriever, bm25_retriever],
                 weights=[config["faissWeight"], config["bm25Weight"]]
@@ -107,38 +125,64 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
             print("⚠️ Warning: BM25 retriever not available, using only FAISS")
             hybrid_retriever = faiss_retriever
 
-        # Step 7: Store metadata in PostgreSQL
-        db_doc = DB_Document(
-            id=doc_id,
-            filename=filename,
-            path=temp_path,
-            filetype=extension,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            is_public=is_public,
-            size=len(file_bytes),
-            status="processed",
-            upload_time=datetime.utcnow()
-        )
-        db.add(db_doc)
+        # Update the global variables in the module
+        retrieverconstruction.faiss_db = faiss_db
+        retrieverconstruction.hybrid_retriever = hybrid_retriever
+
+        # Step 7: Update document metadata in PostgreSQL (don't create new, update existing)
+        print(f"💾 Updating document metadata in PostgreSQL...")
+        
+        # Get the existing document record
+        existing_doc = db.query(DB_Document).filter(DB_Document.id == doc_id).first()
+        if existing_doc:
+            # Update the existing document
+            existing_doc.path = temp_path
+            existing_doc.status = "processed"
+            print(f"✅ Updated existing document with ID: {existing_doc.id}")
+        else:
+            # Fallback: create new document if it doesn't exist (shouldn't happen in normal flow)
+            print(f"⚠️ Warning: Document with ID {doc_id} not found, creating new record")
+            db_doc = DB_Document(
+                id=doc_id,
+                filename=filename,
+                path=temp_path,
+                filetype=extension,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                is_public=is_public,
+                size=len(file_bytes),
+                status="processed",
+                upload_time=datetime.utcnow()
+            )
+            db.add(db_doc)
+            existing_doc = db_doc
+        
         db.flush()
 
-        # Store chunks in database
-        for chunk in chunks:
-            db_chunk = DB_Chunk(
-                doc_id=db_doc.id,
-                text=chunk.page_content,
-            )
-            db.add(db_chunk)
+        # Step 8: Store chunks in database
+        print(f"💾 Saving {len(chunks)} chunks to PostgreSQL...")
+        chunks_saved = 0
+        for i, chunk in enumerate(chunks):
+            try:
+                db_chunk = DB_Chunk(
+                    doc_id=existing_doc.id,
+                    text=chunk.page_content,
+                )
+                db.add(db_chunk)
+                chunks_saved += 1
+            except Exception as chunk_error:
+                print(f"❌ Error saving chunk {i}: {chunk_error}")
 
+        # Commit all changes
+        print("💾 Committing changes to database...")
         db.commit()
-        print(f"✅ Uploaded and processed document '{filename}' with {len(chunks)} chunks.")
-        print(f"📊 FAISS updated with new documents, BM25 remains static (as intended)")
+        print(f"✅ Successfully saved {chunks_saved} chunks to PostgreSQL")
         
         return {
             "status": "success",
             "doc_id": str(doc_id),
             "chunks_created": len(chunks),
+            "chunks_saved": chunks_saved,
             "message": f"Document '{filename}' processed successfully"
         }
 
@@ -148,7 +192,7 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         raise e
     
     finally:
-        # Clean up temp file
+        # Clean up temp file (now temp_path is always defined)
         if temp_path and os.path.exists(temp_path):
             try:
                 os.unlink(temp_path)

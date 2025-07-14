@@ -51,8 +51,6 @@ hybrid_retriever = None
 faiss_retriever = None
 bm25_retriever = None
 
-
-
 # Keep track of visited URLs to avoid re-scraping
 visited_urls = set()
 
@@ -362,13 +360,13 @@ def unload_documents_and_embeddings(clear_faiss=False):
 
     all_documents = []
 
-    if embeddings:
-        del embeddings
-        embeddings = None
+    # if embeddings:
+    #     del embeddings
+    #     embeddings = None
 
-    if clear_faiss and faiss_db:
-        del faiss_db
-        faiss_db = None
+    # if clear_faiss and faiss_db:
+    #     del faiss_db
+    #     faiss_db = None
 
     gc.collect()
     torch.cuda.empty_cache()

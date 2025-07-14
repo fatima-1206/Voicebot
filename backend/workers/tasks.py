@@ -1,7 +1,7 @@
 # To run celery:
 # celery -A backend.workers.celery_worker.celery_app worker --loglevel=info --concurrency=1 --hostname=voicebot@%h
 from backend.workers.celery_worker import celery_app
-
+import json
 # Add this new task after your existing process_uploaded_document task
 # Replace the update_document_visibility task with this corrected version:
 
@@ -296,3 +296,14 @@ def scrape_link(link_id: str, url: str, depth: int, excluded_sublinks: str, tena
         import traceback
         traceback.print_exc()
         return {"status": "error", "error": str(e)}
+    
+
+# Add this task to your existing tasks.py file
+
+@celery_app.task(name='process_query')
+def process_query_task(query_id: str, query: str, tenant_id: str, user_id: str, 
+                      max_tokens: int = 500, temperature: float = 0.7, session_id: str = None):
+    """Process a user query using RAG pipeline asynchronously"""
+    print(f"🔄 Processing query {query_id}: {query[:50]}...")
+    
+    pass

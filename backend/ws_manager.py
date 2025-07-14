@@ -1,3 +1,6 @@
+import json
+
+
 # web sockets manager
 class ConnectionManager:
     def __init__(self):
@@ -17,3 +20,15 @@ class ConnectionManager:
         ws = self.active_connections.get(key)
         if ws:
             await ws.send_text(message)
+
+    async def send_json_to_user(self, tenant_id: str, user_id: str, data: dict):
+        """Send JSON data to a specific user"""
+        key = f"{tenant_id}:{user_id}"
+        ws = self.active_connections.get(key)
+        if ws:
+            await ws.send_json(data)
+
+    def is_connected(self, tenant_id: str, user_id: str) -> bool:
+        """Check if a user is connected"""
+        key = f"{tenant_id}:{user_id}"
+        return key in self.active_connections

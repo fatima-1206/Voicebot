@@ -3,7 +3,13 @@
 To run the app, use the following command:
 
 ```bash
-uvicorn backend.main:app --reload --log-level debug --use-colors
+./start.sh
+```
+
+for dev mode:
+
+```bash
+./start.sh --dev
 ```
 
 it will run on

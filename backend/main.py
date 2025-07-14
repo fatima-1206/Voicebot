@@ -14,6 +14,7 @@ app = FastAPI()
 app.include_router(auth_router, prefix="/auth")
 app.include_router(documents_router, prefix="/documents")  # Add this
 manager = ConnectionManager()
+
 # Dependency to get DB session
 def get_db():
     db = SessionLocal()

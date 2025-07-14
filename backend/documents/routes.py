@@ -7,6 +7,7 @@ from backend.db import models
 from backend.auth.jwt_ import get_current_user, UserTokenData
 from backend.workers.tasks import process_uploaded_document
 import os
+from backend.workers.tasks import update_document_visibility
 
 router = APIRouter()
 
@@ -37,6 +38,15 @@ async def upload_document(
     # Get file extension and size
     extension = os.path.splitext(filename)[-1].lower()
     file_size = len(contents)
+
+    # Check if a document with the same name already exists
+    existing_doc = db.query(models.Document).filter(
+        models.Document.filename == filename,
+        models.Document.tenant_id == current_user.tenant_id
+    ).first()
+
+    if existing_doc:
+        raise HTTPException(status_code=400, detail=f"Document '{filename}' already exists")
 
     # Save metadata to DB with all required fields
     document = models.Document(
@@ -93,25 +103,32 @@ def list_documents(
         for d in docs
     ]
 
-@router.get("/{doc_id}")
+@router.get("/{identifier}")
 def get_document_details(
-    doc_id: str,
+    identifier: str,
     db: Session = Depends(get_db),
     current_user: UserTokenData = Depends(get_current_user)
 ):
-    """Get details of a specific document"""
-    try:
-        doc_uuid = uuid4() if doc_id == "new" else doc_id
-    except:
-        raise HTTPException(status_code=400, detail="Invalid document ID")
+    """Get details of a specific document by ID or filename"""
     
-    document = db.query(models.Document).filter(
-        models.Document.id == doc_uuid,
-        models.Document.tenant_id == current_user.tenant_id
-    ).first()
+    # Try to parse as UUID first
+    try:
+        from uuid import UUID
+        doc_uuid = UUID(identifier)
+        # Search by ID
+        document = db.query(models.Document).filter(
+            models.Document.id == doc_uuid,
+            models.Document.tenant_id == current_user.tenant_id
+        ).first()
+    except ValueError:
+        # If not a valid UUID, search by filename
+        document = db.query(models.Document).filter(
+            models.Document.filename == identifier,
+            models.Document.tenant_id == current_user.tenant_id
+        ).first()
     
     if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail=f"Document '{identifier}' not found")
     
     # Get chunks for this document
     chunks = db.query(models.Chunk).filter(
@@ -136,31 +153,93 @@ def get_document_details(
         ]
     }
 
-@router.delete("/{doc_id}")
-def delete_document(
-    doc_id: str,
+
+# Add this new endpoint after your existing routes
+@router.patch("/{identifier}/visibility")
+async def update_document_visibility_endpoint(
+    identifier: str,
+    is_public: bool,
     db: Session = Depends(get_db),
     current_user: UserTokenData = Depends(get_current_user)
 ):
-    """Delete a document and its chunks"""
-    try:
-        doc_uuid = doc_id
-    except:
-        raise HTTPException(status_code=400, detail="Invalid document ID")
+    """Update document visibility (public/private)"""
     
-    document = db.query(models.Document).filter(
-        models.Document.id == doc_uuid,
-        models.Document.tenant_id == current_user.tenant_id
-    ).first()
+    # Find the document (same logic as get_document_details)
+    try:
+        from uuid import UUID
+        doc_uuid = UUID(identifier)
+        # Search by ID
+        document = db.query(models.Document).filter(
+            models.Document.id == doc_uuid,
+            models.Document.tenant_id == current_user.tenant_id
+        ).first()
+    except ValueError:
+        # If not a valid UUID, search by filename
+        document = db.query(models.Document).filter(
+            models.Document.filename == identifier,
+            models.Document.tenant_id == current_user.tenant_id
+        ).first()
     
     if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail=f"Document '{identifier}' not found")
     
-    # Delete chunks first (due to foreign key constraint)
-    db.query(models.Chunk).filter(models.Chunk.doc_id == document.id).delete()
+    # Check if user has permission (document owner or admin)
+    if document.user_id != current_user.user_id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="You don't have permission to modify this document")
     
-    # Delete document
-    db.delete(document)
+    # If the visibility is already the same, no need to process
+    if document.is_public == is_public:
+        return {
+            "message": f"Document '{document.filename}' is already {'public' if is_public else 'private'}",
+            "doc_id": str(document.id),
+            "filename": document.filename,
+            "is_public": is_public
+        }
+    
+    # Update the database immediately for quick response
+    document.is_public = is_public
     db.commit()
     
-    return {"message": f"Document '{document.filename}' deleted successfully"}
+    # Send to Celery for FAISS metadata update
+    update_document_visibility.delay(
+        doc_id=str(document.id),
+        is_public=is_public,
+        tenant_id=str(current_user.tenant_id)
+    )
+    
+    return {
+        "message": f"Document '{document.filename}' visibility updated to {'public' if is_public else 'private'}. Vector store is being updated in background.",
+        "doc_id": str(document.id),
+        "filename": document.filename,
+        "is_public": is_public,
+        "status": "updating_vector_store"
+    }
+
+# @router.delete("/{doc_id}")
+# def delete_document(
+#     doc_id: str,
+#     db: Session = Depends(get_db),
+#     current_user: UserTokenData = Depends(get_current_user)
+# ):
+#     """Delete a document and its chunks"""
+#     try:
+#         doc_uuid = doc_id
+#     except:
+#         raise HTTPException(status_code=400, detail="Invalid document ID")
+    
+#     document = db.query(models.Document).filter(
+#         models.Document.id == doc_uuid,
+#         models.Document.tenant_id == current_user.tenant_id
+#     ).first()
+    
+#     if not document:
+#         raise HTTPException(status_code=404, detail="Document not found")
+    
+#     # Delete chunks first (due to foreign key constraint)
+#     db.query(models.Chunk).filter(models.Chunk.doc_id == document.id).delete()
+    
+#     # Delete document
+#     db.delete(document)
+#     db.commit()
+    
+#     return {"message": f"Document '{document.filename}' deleted successfully"}

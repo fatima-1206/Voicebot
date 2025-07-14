@@ -179,7 +179,7 @@ mkdir -p tmp
 
 # Save PIDs
 echo "$CELERY_PID" > tmp/celery.pid
-echo "$FASTAPI_PID" > temp/fastapi.pid
+echo "$FASTAPI_PID" > tmp/fastapi.pid
 
 echo ""
 echo -e "${GREEN}✅ Application started successfully!${NC}"

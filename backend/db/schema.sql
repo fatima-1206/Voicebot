@@ -1,5 +1,29 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- Add this new table at the end of the file, before the closing
+
+-- ======================
+-- Links for Web Scraping
+-- ======================
+drop table if exists links cascade;
+CREATE TABLE links (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    url TEXT NOT NULL,
+    name TEXT,                  -- Optional friendly name for the link
+    description TEXT,           -- Optional description
+    depth INT DEFAULT 1,        -- Scraping depth
+    excluded_sublinks TEXT,     -- Pipe-separated list of excluded patterns
+    status TEXT DEFAULT 'active', -- active, disabled, scraping, completed, error
+    last_scraped TIMESTAMP,     -- When it was last scraped
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    
+    -- Prevent duplicate URLs per tenant
+    UNIQUE(tenant_id, url)
+);
+
 -- this is postgresql schema for a multi-tenant application with billing, rate limits, and usage tracking
 -- ======================
 -- Billing Plans

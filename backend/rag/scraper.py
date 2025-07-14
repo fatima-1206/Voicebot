@@ -36,46 +36,45 @@ def extract_text_from_page(html):
     return content
 
 # Function to crawl and scrape the website
-def crawl_website(start_url:str, excluded_sublinks:str="", depth:int=-1):
-    pages_not_to_visit = []
-    if excluded_sublinks != "":
-        pages_not_to_visit = excluded = excluded_sublinks.split("|")
-    pages_to_visit = [start_url]
-    print(f"Scraping {start_url} and sub pages...")
+def crawl_website(start_url: str, excluded_sublinks: str = "", max_depth: int = -1):
+    pages_not_to_visit = excluded_sublinks.split("|") if excluded_sublinks else []
+    
+    # Queue now contains (url, current_depth)
+    pages_to_visit = [(start_url, 0)]
+    print(f"Scraping {start_url} and sub pages up to depth {max_depth if max_depth >= 0 else '∞'}...")
+
     while pages_to_visit:
-        url = pages_to_visit.pop()
-        
+        url, current_depth = pages_to_visit.pop(0)
+
         if url in visited_urls:
             continue
-        
         visited_urls.add(url)
 
-        
         html = fetch_page(url)
         if not html:
             continue
-        
+
         # Extract content
         page_text = extract_text_from_page(html)
         if page_text:
-            # Save the extracted text into the scraped_docs list
             scraped_docs.append({
                 "url": url,
                 "content": page_text
             })
-        
-        # Find all links on the current page and add to the list to visit
+
+        # Stop if we've reached the max depth
+        if 0 <= max_depth <= current_depth:
+            continue
+
+        # Find and queue new links
         soup = BeautifulSoup(html, 'html.parser')
         links = soup.find_all('a', href=True)
         for link in links:
             link_url = urljoin(url, link['href'])
-            # Only add links from the same domain
             if start_url in link_url and link_url not in visited_urls:
-                # check if there are some words in the url to filter out useless pages
                 if any(word.lower() in link_url.lower() for word in pages_not_to_visit):
                     continue
-                else:
-                    pages_to_visit.append(link_url)
+                pages_to_visit.append((link_url, current_depth + 1))
 
     return scraped_docs
 

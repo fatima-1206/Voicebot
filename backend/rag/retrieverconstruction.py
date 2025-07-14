@@ -27,6 +27,10 @@ from langchain_core.documents import Document
 from backend.rag.scraper import crawl_website, save_to_json
 from langchain.text_splitter import TokenTextSplitter
 import csv
+# Add imports for database access
+from backend.db.connection import SessionLocal
+from backend.db.models import Document as DB_Document, Chunk as DB_Chunk
+from sqlalchemy.orm import Session, joinedload
 
 splitter = TokenTextSplitter(chunk_size=256, chunk_overlap=64)
 
@@ -53,6 +57,78 @@ bm25_retriever = None
 
 # Keep track of visited URLs to avoid re-scraping
 visited_urls = set()
+
+def load_documents_from_postgres(db: Session = None, tenant_id: str = None):
+    """
+    Load document chunks from PostgreSQL database and append them to all_documents.
+    
+    Args:
+        db: Database session (optional, will create new if not provided)
+        tenant_id: Filter documents by tenant_id (optional, loads all if not provided)
+    """
+    global all_documents
+    
+    # Create database session if not provided
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+    else:
+        close_db = False
+    
+    try:
+        print("Loading documents from PostgreSQL database...")
+        
+        # Query to get all processed documents, optionally filtered by tenant_id
+        query = db.query(DB_Document).filter(DB_Document.status == 'processed')
+        
+        if tenant_id:
+            query = query.filter(DB_Document.tenant_id == tenant_id)
+        
+        documents = query.all()
+        
+        postgres_docs_count = 0
+        postgres_chunks_count = 0
+        
+        for doc in documents:
+            # Get chunks for this document using the foreign key relationship
+            chunks = db.query(DB_Chunk).filter(DB_Chunk.doc_id == doc.id).all()
+            
+            for chunk in chunks:
+                # Create metadata for the chunk
+                metadata = {
+                    "source": "user_uploaded",
+                    "filename": doc.filename,
+                    "filetype": doc.filetype,
+                    "doc_id": str(doc.id),
+                    "tenant_id": str(doc.tenant_id),
+                    "user_id": str(doc.user_id),
+                    "is_public": doc.is_public,
+                    "upload_time": doc.upload_time.isoformat() if doc.upload_time else None,
+                    "file_size": doc.size,
+                    "chunk_id": str(chunk.id),
+                    "language": chunk.language
+                }
+                
+                # Create langchain Document and append to all_documents
+                lc_document = Document(
+                    page_content=chunk.text,
+                    metadata=metadata
+                )
+                all_documents.append(lc_document)
+                postgres_chunks_count += 1
+            
+            postgres_docs_count += 1
+        
+        print(f"  -> Loaded {postgres_chunks_count} chunks from {postgres_docs_count} PostgreSQL documents")
+        return postgres_chunks_count, postgres_docs_count
+        
+    except Exception as e:
+        print(f"  -> Error loading documents from PostgreSQL: {e}")
+        return 0, 0
+    
+    finally:
+        if close_db:
+            db.close()
 
 def load_scraped_documents(start_url:str, excluded_sublinks:str, depth=-1, json_path = "backend/rag/scraped_docs.json"):
     """
@@ -104,7 +180,7 @@ def scrape_links_from_csv(csv_path=csv_path, json_path = "backend/rag/scraped_do
             else:
                 load_scraped_documents(start_url=start_url, excluded_sublinks=row["excluded_sublinks"])
 
-def load_documents():
+def load_documents(include_postgres=True, tenant_id=None):
     global all_documents, db_initialized
 
     if db_initialized:
@@ -116,6 +192,9 @@ def load_documents():
     # First try loading from cache
     if load_documents_cache():
         db_initialized = True
+        # Still load PostgreSQL documents even if cache exists, as they might be new
+        if include_postgres:
+            load_documents_from_postgres(tenant_id=tenant_id)
         return
 
     # If cache is not available or invalid, load from files
@@ -163,6 +242,10 @@ def load_documents():
     scrape_links_from_csv()
     print(f"Total local documents loaded after scraping: {len(all_documents)}")
 
+    # Load documents from PostgreSQL
+    if include_postgres:
+        load_documents_from_postgres(tenant_id=tenant_id)
+        print(f"Total documents loaded after PostgreSQL: {len(all_documents)}")
 
     # Wikipedia documents
     try:
@@ -224,10 +307,14 @@ def load_vectorstore():
 
 
 
-def construct_retrievers():
+def construct_retrievers(include_postgres=True, tenant_id=None):
     """
     Construct the retrievers for the loaded documents.
     This function initializes the FAISS and BM25 retrievers.
+    
+    Args:
+        include_postgres: Whether to include documents from PostgreSQL
+        tenant_id: Filter PostgreSQL documents by tenant_id (optional)
     """
     global db_initialized, faiss_db, hybrid_retriever
 
@@ -235,12 +322,15 @@ def construct_retrievers():
     # the folder hash must be checked to make sure the faiss index is still valid
     if faiss_db and load_documents_cache():
         print("FAISS vector store loaded from disk.")
+        # Still load PostgreSQL documents even if cache exists
+        if include_postgres:
+            load_documents_from_postgres(tenant_id=tenant_id)
     else:
         if db_initialized:
             print("Retrievers already constructed. Skipping.")
             return faiss_db, bm25_retriever, faiss_retriever
 
-        load_documents()
+        load_documents(include_postgres=include_postgres, tenant_id=tenant_id)
         
         if not all_documents:
             print("No documents loaded. Cannot construct retrievers.")
@@ -252,7 +342,7 @@ def construct_retrievers():
         print("FAISS vector store created successfully.")
 
     if not all_documents:
-        load_documents()
+        load_documents(include_postgres=include_postgres, tenant_id=tenant_id)
         if not all_documents:
             print("No documents loaded. Cannot construct retrievers.")
             return None, None, None
@@ -279,7 +369,7 @@ def construct_retrievers():
 
     db_initialized = True
     print("Retrievers constructed successfully.")
-    unload_documents_and_embeddings(clear_faiss=False)  # Clear documents and embeddings after retrievers are created
+    unload_documents_and_embeddings(clear_faiss=False)  # Clear documents and embeddings after retrievers are constructed
     
     return faiss_db, hybrid_retriever
 

@@ -307,3 +307,9 @@ def process_query_task(query_id: str, query: str, tenant_id: str, user_id: str,
     print(f"🔄 Processing query {query_id}: {query[:50]}...")
     
     pass
+
+@celery_app.task(name='speech_to_text')
+def speech_to_text_task(stt_id: str, audio_bytes: str, filename: str, language: str, tenant_id: str, user_id: str):
+    """Convert speech to text using Whisper or other STT engine"""
+    print(f"🎤 Processing STT request {stt_id}: {filename}")
+    

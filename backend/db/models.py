@@ -116,3 +116,19 @@ class Session(Base):
     seconds = Column(Integer, default=0)
     channel = Column(String)
     status = Column(String, default='active')
+
+
+class Link(Base):
+    __tablename__ = "links"
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    url = Column(String, nullable=False)
+    name = Column(String)
+    description = Column(Text)
+    depth = Column(Integer, default=1)
+    excluded_sublinks = Column(String)  # Pipe-separated patterns
+    status = Column(String, default='active')  # active, disabled, scraping, completed, error
+    last_scraped = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

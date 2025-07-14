@@ -6,6 +6,7 @@ from backend.db.setup import db_has_tables, run_sql_file
 import os
 from backend.auth.routes import router as auth_router
 from backend.documents.routes import router as documents_router  
+from backend.links.routes import router as links_router
 from backend.ws_manager import ConnectionManager
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -13,6 +14,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 app = FastAPI()
 app.include_router(auth_router, prefix="/auth")
 app.include_router(documents_router, prefix="/documents")  # Add this
+app.include_router(links_router, prefix="/links")
 manager = ConnectionManager()
 
 # Dependency to get DB session

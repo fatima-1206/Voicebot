@@ -147,3 +147,152 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         import traceback
         traceback.print_exc()
         return {"status": "error", "error": str(e)}
+    
+
+# Add this new task after your existing tasks
+
+@celery_app.task(name='scrape_link')
+def scrape_link(link_id: str, url: str, depth: int, excluded_sublinks: str, tenant_id: str, user_id: str):
+    """Scrape a website link and add documents to the knowledge base"""
+    print(f"🔄 Starting scraping for link {link_id}: {url}")
+    
+    try:
+        from backend.db.connection import SessionLocal
+        from backend.db.models import Link, Document as DB_Document, Chunk as DB_Chunk
+        from backend.rag.scraper import crawl_website
+        from backend.rag import retrieverconstruction
+        from langchain_core.documents import Document as LC_Document
+        from langchain.text_splitter import TokenTextSplitter
+        from uuid import UUID, uuid4
+        from datetime import datetime
+        
+        db = SessionLocal()
+        
+        try:
+            # Get the link record
+            link_uuid = UUID(link_id)
+            link = db.query(Link).filter(Link.id == link_uuid).first()
+            
+            if not link:
+                raise ValueError(f"Link with ID {link_id} not found")
+            
+            print(f"📄 Scraping: {link.name or url}")
+            
+            # Perform the scraping
+            scraped_docs = crawl_website(
+                start_url=url,
+                excluded_sublinks=excluded_sublinks,
+                depth=depth
+            )
+            
+            if not scraped_docs:
+                link.status = "completed"
+                link.last_scraped = datetime.utcnow()
+                db.commit()
+                return {
+                    "status": "success",
+                    "message": "No content found to scrape",
+                    "docs_scraped": 0
+                }
+            
+            print(f"📝 Scraped {len(scraped_docs)} pages")
+            
+            # Process scraped content into chunks
+            splitter = TokenTextSplitter(chunk_size=256, chunk_overlap=64)
+            
+            total_chunks = 0
+            for doc_data in scraped_docs:
+                # Create a document record for each scraped page
+                doc_id = uuid4()
+                
+                # Create document in database
+                document = DB_Document(
+                    id=doc_id,
+                    tenant_id=UUID(tenant_id),
+                    user_id=UUID(user_id),
+                    filename=f"scraped_{doc_data['url'].split('/')[-1] or 'page'}.html",
+                    filetype=".html",
+                    size=len(doc_data['content']),
+                    is_public=False,  # Scraped content is private by default
+                    status="processed",
+                    upload_time=datetime.utcnow()
+                )
+                db.add(document)
+                db.flush()  # Get the ID
+                
+                # Split content into chunks
+                chunks = splitter.split_text(doc_data['content'])
+                
+                # Save chunks to database
+                for chunk_text in chunks:
+                    chunk = DB_Chunk(
+                        doc_id=document.id,
+                        text=chunk_text,
+                        language="en"  # Assume English for web content
+                    )
+                    db.add(chunk)
+                    total_chunks += 1
+                
+                print(f"📄 Created document {document.filename} with {len(chunks)} chunks")
+            
+            # Commit all database changes
+            db.commit()
+            print(f"💾 Saved {len(scraped_docs)} documents with {total_chunks} total chunks")
+            
+            # Update vector store
+            print("🔧 Updating vector store with scraped content...")
+            
+            # Force rebuild of retrievers to include new content
+            retrieverconstruction.clear_cache()
+            retrieverconstruction.db_initialized = False
+            retrieverconstruction.faiss_db = None
+            retrieverconstruction.hybrid_retriever = None
+            
+            # Reconstruct with new data
+            faiss_db, hybrid_retriever = retrieverconstruction.construct_retrievers(
+                include_postgres=True
+            )
+            
+            if faiss_db is None:
+                print("⚠️ Warning: Failed to update vector store")
+            else:
+                print("✅ Vector store updated with scraped content")
+            
+            # Update link status
+            link.status = "completed"
+            link.last_scraped = datetime.utcnow()
+            link.updated_at = datetime.utcnow()
+            db.commit()
+            
+            return {
+                "status": "success",
+                "link_id": link_id,
+                "url": url,
+                "docs_scraped": len(scraped_docs),
+                "total_chunks": total_chunks,
+                "message": f"Successfully scraped {len(scraped_docs)} pages with {total_chunks} chunks"
+            }
+            
+        except Exception as db_error:
+            print(f"❌ Database error in scraping: {db_error}")
+            
+            # Update link status to error
+            try:
+                link = db.query(Link).filter(Link.id == UUID(link_id)).first()
+                if link:
+                    link.status = "error"
+                    link.updated_at = datetime.utcnow()
+                    db.commit()
+            except:
+                pass
+            
+            db.rollback()
+            raise db_error
+        finally:
+            db.close()
+            
+    except Exception as e:
+        print(f"❌ Error scraping link: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "error": str(e)}

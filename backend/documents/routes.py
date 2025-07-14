@@ -38,6 +38,15 @@ async def upload_document(
     extension = os.path.splitext(filename)[-1].lower()
     file_size = len(contents)
 
+    # Check if a document with the same name already exists
+    existing_doc = db.query(models.Document).filter(
+        models.Document.filename == filename,
+        models.Document.tenant_id == current_user.tenant_id
+    ).first()
+
+    if existing_doc:
+        raise HTTPException(status_code=400, detail=f"Document '{filename}' already exists")
+
     # Save metadata to DB with all required fields
     document = models.Document(
         id=doc_id,
@@ -93,25 +102,32 @@ def list_documents(
         for d in docs
     ]
 
-@router.get("/{doc_id}")
+@router.get("/{identifier}")
 def get_document_details(
-    doc_id: str,
+    identifier: str,
     db: Session = Depends(get_db),
     current_user: UserTokenData = Depends(get_current_user)
 ):
-    """Get details of a specific document"""
-    try:
-        doc_uuid = uuid4() if doc_id == "new" else doc_id
-    except:
-        raise HTTPException(status_code=400, detail="Invalid document ID")
+    """Get details of a specific document by ID or filename"""
     
-    document = db.query(models.Document).filter(
-        models.Document.id == doc_uuid,
-        models.Document.tenant_id == current_user.tenant_id
-    ).first()
+    # Try to parse as UUID first
+    try:
+        from uuid import UUID
+        doc_uuid = UUID(identifier)
+        # Search by ID
+        document = db.query(models.Document).filter(
+            models.Document.id == doc_uuid,
+            models.Document.tenant_id == current_user.tenant_id
+        ).first()
+    except ValueError:
+        # If not a valid UUID, search by filename
+        document = db.query(models.Document).filter(
+            models.Document.filename == identifier,
+            models.Document.tenant_id == current_user.tenant_id
+        ).first()
     
     if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=404, detail=f"Document '{identifier}' not found")
     
     # Get chunks for this document
     chunks = db.query(models.Chunk).filter(
@@ -136,31 +152,31 @@ def get_document_details(
         ]
     }
 
-@router.delete("/{doc_id}")
-def delete_document(
-    doc_id: str,
-    db: Session = Depends(get_db),
-    current_user: UserTokenData = Depends(get_current_user)
-):
-    """Delete a document and its chunks"""
-    try:
-        doc_uuid = doc_id
-    except:
-        raise HTTPException(status_code=400, detail="Invalid document ID")
+# @router.delete("/{doc_id}")
+# def delete_document(
+#     doc_id: str,
+#     db: Session = Depends(get_db),
+#     current_user: UserTokenData = Depends(get_current_user)
+# ):
+#     """Delete a document and its chunks"""
+#     try:
+#         doc_uuid = doc_id
+#     except:
+#         raise HTTPException(status_code=400, detail="Invalid document ID")
     
-    document = db.query(models.Document).filter(
-        models.Document.id == doc_uuid,
-        models.Document.tenant_id == current_user.tenant_id
-    ).first()
+#     document = db.query(models.Document).filter(
+#         models.Document.id == doc_uuid,
+#         models.Document.tenant_id == current_user.tenant_id
+#     ).first()
     
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
+#     if not document:
+#         raise HTTPException(status_code=404, detail="Document not found")
     
-    # Delete chunks first (due to foreign key constraint)
-    db.query(models.Chunk).filter(models.Chunk.doc_id == document.id).delete()
+#     # Delete chunks first (due to foreign key constraint)
+#     db.query(models.Chunk).filter(models.Chunk.doc_id == document.id).delete()
     
-    # Delete document
-    db.delete(document)
-    db.commit()
+#     # Delete document
+#     db.delete(document)
+#     db.commit()
     
-    return {"message": f"Document '{document.filename}' deleted successfully"}
+#     return {"message": f"Document '{document.filename}' deleted successfully"}

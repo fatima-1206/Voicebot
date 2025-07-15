@@ -2,6 +2,12 @@
 # celery -A backend.workers.celery_worker.celery_app worker --loglevel=info --concurrency=1 --hostname=voicebot@%h
 from backend.workers.celery_worker import celery_app
 import json
+from backend.response_generation.generator import generate_response
+from backend.db.connection import SessionLocal
+# from backend.db.models import Query as DB_Query
+from uuid import UUID
+from datetime import datetime
+import torch
 # Add this new task after your existing process_uploaded_document task
 # Replace the update_document_visibility task with this corrected version:
 
@@ -129,8 +135,8 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
                 doc_id=doc_id,
                 tenant_id=tenant_id,
                 user_id=user_id,
-                is_public=is_public,
-                db=db  # Don't forget this!
+                is_public=is_public
+                # db=db  # Don't forget this!
             )
             print(f"✅ Document processing completed: {result}")
             return result
@@ -300,16 +306,237 @@ def scrape_link(link_id: str, url: str, depth: int, excluded_sublinks: str, tena
 
 # Add this task to your existing tasks.py file
 
-@celery_app.task(name='process_query')
-def process_query_task(query_id: str, query: str, tenant_id: str, user_id: str, 
+@celery_app.task(name='process_query', bind=True)
+def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id: str, 
                       max_tokens: int = 500, temperature: float = 0.7, session_id: str = None):
     """Process a user query using RAG pipeline asynchronously"""
     print(f"🔄 Processing query {query_id}: {query[:50]}...")
+    print(f"🔧 Task running in worker: {self.request.hostname}")
     
-    pass
+    try:
+        # Import here to avoid import issues in workers
+        from backend.response_generation.generator import generate_response
+        from backend.db.connection import SessionLocal
+        from backend.db.models import QueryLog as DB_QueryLog
+        from uuid import UUID
+        from datetime import datetime
+        
+        # Ensure everything is initialized
+        print(f"🔧 Ensuring RAG components are initialized...")
+        try:
+            from backend.response_generation.generator import initialize_rag_chain, initialize_model
+            
+            # Force initialization if needed
+            initialize_model()
+            initialize_rag_chain()
+            print(f"✅ RAG components verified/initialized")
+            
+        except Exception as init_error:
+            print(f"❌ Failed to initialize RAG components: {init_error}")
+            import traceback
+            traceback.print_exc()
+            # Don't fail here, let generate_response handle it
+        
+        # Generate the response using RAG
+        print(f"🤖 Generating response for query: {query}")
+        
+        # Add timeout and better error handling
+        try:
+            response = generate_response(query)
+        except Exception as gen_error:
+            print(f"❌ Error in generate_response: {gen_error}")
+            import traceback
+            traceback.print_exc()
+            response = f"I apologize, but I encountered an error while processing your query: {str(gen_error)}"
+        
+        if response is None:
+            print("⚠️ generate_response returned None")
+            response = "I apologize, but I was unable to generate a response to your query. Please try again."
+        
+        if not response.strip():
+            print("⚠️ generate_response returned empty string")
+            response = "I apologize, but I couldn't generate a meaningful response to your query. Please try rephrasing your question."
+        
+        print(f"✅ Generated response: {response[:100]}...")
+        
+        # Save query and response to database using query_logs table
+        try:
+            db = SessionLocal()
+            
+            # Create query log record using the correct table structure
+            query_log_record = DB_QueryLog(
+                id=UUID(query_id),
+                user_id=UUID(user_id),
+                session_id=UUID(session_id) if session_id and session_id != 'string' else None,
+                query=query,
+                response=response,
+                timestamp=datetime.utcnow()
+            )
+            db.add(query_log_record)
+            db.commit()
+            print(f"💾 Query and response saved to query_logs table")
+            
+        except Exception as db_error:
+            print(f"⚠️ Warning: Failed to save to database: {db_error}")
+            import traceback
+            traceback.print_exc()
+            # Continue even if database save fails
+        finally:
+            if 'db' in locals():
+                db.close()
+        
+        result = {
+            "status": "success",
+            "query_id": query_id,
+            "query": query,
+            "response": response,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "worker": self.request.hostname
+        }
+        
+        print(f"✅ Query processing completed successfully")
+        print(f"📝 Response: {response[:100]}...")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return result
+        
+    except Exception as e:
+        print(f"❌ Error processing query: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        return {
+            "status": "error",
+            "query_id": query_id,
+            "query": query,
+            "error": str(e),
+            "worker": self.request.hostname
+        }
 
 @celery_app.task(name='speech_to_text')
 def speech_to_text_task(stt_id: str, audio_bytes: str, filename: str, language: str, tenant_id: str, user_id: str):
     """Convert speech to text using Whisper or other STT engine"""
     print(f"🎤 Processing STT request {stt_id}: {filename}")
+
+@celery_app.task(name='generate_response_async', bind=True)
+def generate_response_async(self, query: str, use_reranking: bool = False, top_k: int = 2):
+    """
+    Asynchronously generate a response using RAG.
     
+    Args:
+        query (str): The input query
+        use_reranking (bool): Whether to use reranking
+        top_k (int): Number of top documents for reranking
+    
+    Returns:
+        dict: Response with generated text and metadata
+    """
+    try:
+        print(f"🤖 Starting response generation for query: {query[:100]}...")
+        
+        # Update task state to indicate processing has started
+        self.update_state(
+            state='PROCESSING',
+            meta={'message': 'Initializing response generation...', 'progress': 10}
+        )
+        
+        # Import here to avoid circular imports
+        from backend.response_generation.generator import generate_response, generate_response_with_reranking
+        
+        self.update_state(
+            state='PROCESSING',
+            meta={'message': 'Retrieving relevant documents...', 'progress': 30}
+        )
+        
+        # Generate response based on reranking preference
+        if use_reranking:
+            response = generate_response_with_reranking(query, top_k=top_k)
+        else:
+            response = generate_response(query)
+        
+        self.update_state(
+            state='PROCESSING',
+            meta={'message': 'Generating final response...', 'progress': 80}
+        )
+        
+        result = {
+            "status": "success",
+            "query": query,
+            "response": response,
+            "use_reranking": use_reranking,
+            "top_k": top_k if use_reranking else None,
+            "task_id": self.request.id
+        }
+        
+        print(f"✅ Response generated successfully")
+        return result
+        
+    except Exception as e:
+        print(f"❌ Error generating response: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        return {
+            "status": "error",
+            "error": str(e),
+            "query": query,
+            "task_id": self.request.id
+        }
+
+@celery_app.task(name='batch_generate_responses')
+def batch_generate_responses(queries: list, use_reranking: bool = False, top_k: int = 2):
+    """
+    Generate responses for multiple queries in batch.
+    
+    Args:
+        queries (list): List of query strings
+        use_reranking (bool): Whether to use reranking
+        top_k (int): Number of top documents for reranking
+    
+    Returns:
+        dict: Batch results
+    """
+    try:
+        print(f"🔄 Processing batch of {len(queries)} queries...")
+        
+        from backend.response_generation.generator import generate_response, generate_response_with_reranking
+        
+        results = []
+        for i, query in enumerate(queries):
+            try:
+                if use_reranking:
+                    response = generate_response_with_reranking(query, top_k=top_k)
+                else:
+                    response = generate_response(query)
+                
+                results.append({
+                    "query": query,
+                    "response": response,
+                    "status": "success"
+                })
+                
+            except Exception as query_error:
+                results.append({
+                    "query": query,
+                    "response": None,
+                    "status": "error",
+                    "error": str(query_error)
+                })
+        
+        return {
+            "status": "completed",
+            "total_queries": len(queries),
+            "successful": len([r for r in results if r["status"] == "success"]),
+            "failed": len([r for r in results if r["status"] == "error"]),
+            "results": results
+        }
+        
+    except Exception as e:
+        print(f"❌ Error in batch processing: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "total_queries": len(queries)
+        }

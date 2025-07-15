@@ -20,14 +20,22 @@ celery_app.conf.task_routes = {
     "backend.workers.tasks.*": {"queue": "default"},
 }
 
+# Update celery worker configuration for better performance
 celery_app.conf.update(
     task_serializer='json',
     accept_content=['json'],
     result_serializer='json',
     timezone='UTC',
     enable_utc=True,
-    worker_pool='threads',  # Add this line
-    worker_concurrency=1,   # Add this line
+    worker_pool='threads',
+    worker_concurrency=2,  # Increase from 1 to 2 for better throughput
+    task_acks_late=True,  # Only acknowledge after task completion
+    worker_prefetch_multiplier=1,  # Prevent memory issues
+    task_compression='gzip',  # Compress large payloads
+    result_compression='gzip',
+    task_time_limit=300,  # 5 minute timeout
+    task_soft_time_limit=240,  # 4 minute soft timeout
+    worker_max_tasks_per_child=50,  # Restart worker after 50 tasks to prevent memory leaks
 )
 
 # Initialize everything when worker starts

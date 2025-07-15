@@ -4,131 +4,333 @@ from backend.workers.celery_worker import celery_app
 import json
 from backend.response_generation.generator import generate_response
 from backend.db.connection import SessionLocal
-# from backend.db.models import Query as DB_Query
 from uuid import UUID
 from datetime import datetime
 import torch
-# Add this new task after your existing process_uploaded_document task
-# Replace the update_document_visibility task with this corrected version:
+from contextlib import contextmanager
+from typing import List, Dict, Any
+import gc
 
-@celery_app.task(name='update_document_visibility')
-def update_document_visibility(doc_id: str, is_public: bool, tenant_id: str):
-    """Update document visibility by rebuilding retrievers with updated metadata"""
+# Add connection pooling and memory management
+@contextmanager
+def get_db_session():
+    """Context manager for database sessions with proper cleanup"""
+    db = SessionLocal()
+    try:
+        yield db
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+@contextmanager
+def manage_gpu_memory():
+    """Context manager for GPU memory cleanup"""
+    try:
+        yield
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+# Optimized batch document processing
+@celery_app.task(name='batch_process_documents', bind=True)
+def batch_process_documents(self, documents_data: List[Dict], tenant_id: str, user_id: str):
+    """Process multiple documents in a single task for better efficiency"""
+    print(f"🔄 Batch processing {len(documents_data)} documents")
+    
+    with manage_gpu_memory():
+        with get_db_session() as db:
+            try:
+                from backend.rag.add_document import process_uploaded_document as process_doc
+                
+                results = []
+                total_docs = len(documents_data)
+                
+                for i, doc_data in enumerate(documents_data):
+                    self.update_state(
+                        state='PROGRESS',
+                        meta={'current': i + 1, 'total': total_docs, 'status': f'Processing {doc_data["filename"]}'}
+                    )
+                    
+                    try:
+                        result = process_doc(
+                            file_bytes=doc_data["file_bytes"],
+                            filename=doc_data["filename"],
+                            doc_id=doc_data["doc_id"],
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            is_public=doc_data.get("is_public", False)
+                        )
+                        results.append({"doc_id": doc_data["doc_id"], "status": "success", "result": result})
+                    except Exception as e:
+                        results.append({"doc_id": doc_data["doc_id"], "status": "error", "error": str(e)})
+                
+                # Single retriever rebuild after all documents processed
+                self.update_state(
+                    state='PROGRESS',
+                    meta={'current': total_docs, 'total': total_docs, 'status': 'Rebuilding search index...'}
+                )
+                
+                # Only rebuild once at the end
+                _rebuild_retrievers_once()
+                
+                return {
+                    "status": "success",
+                    "processed": len([r for r in results if r["status"] == "success"]),
+                    "failed": len([r for r in results if r["status"] == "error"]),
+                    "results": results
+                }
+                
+            except Exception as e:
+                print(f"❌ Batch processing error: {e}")
+                return {"status": "error", "error": str(e)}
+
+# Optimized single retriever rebuild function
+def _rebuild_retrievers_once():
+    """Rebuild retrievers only once - used by batch operations"""
+    try:
+        from backend.rag import retrieverconstruction
+        
+        # Clear cache efficiently
+        retrieverconstruction.clear_cache()
+        
+        # Rebuild with optimized settings
+        faiss_db, hybrid_retriever = retrieverconstruction.construct_retrievers(
+            include_postgres=True,
+            force_rebuild=True
+        )
+        
+        if faiss_db is None or hybrid_retriever is None:
+            raise ValueError("Failed to rebuild retrievers")
+        
+        print("✅ Retrievers rebuilt successfully")
+        
+    except Exception as e:
+        print(f"❌ Error rebuilding retrievers: {e}")
+        raise
+
+# Optimized document visibility update (avoid full rebuild)
+@celery_app.task(name='update_document_visibility_optimized')
+def update_document_visibility_optimized(doc_id: str, is_public: bool, tenant_id: str):
+    """Update document visibility without full retriever rebuild"""
     print(f"🔄 Updating visibility for document {doc_id} to {'public' if is_public else 'private'}")
     
-    try:
-        from backend.db.connection import SessionLocal
-        from backend.rag import retrieverconstruction
-        from backend.db.models import Document as DB_Document, Chunk as DB_Chunk
-        from uuid import UUID
-        from sqlalchemy import text
-        
-        # Create database session
-        db = SessionLocal()
-        
+    with get_db_session() as db:
         try:
-            # Verify database connection
-            db.execute(text("SELECT 1")).fetchone()
-            print("✅ Database connection verified for visibility update")
+            from backend.db.models import Document as DB_Document
+            from uuid import UUID
             
-            # Convert string UUIDs to UUID objects
             doc_uuid = UUID(doc_id) if isinstance(doc_id, str) else doc_id
             tenant_uuid = UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
             
-            # Get the document
+            # Update document metadata only
             document = db.query(DB_Document).filter(DB_Document.id == doc_uuid).first()
             if not document:
                 raise ValueError(f"Document with ID {doc_id} not found")
             
-            print(f"📄 Found document: {document.filename}")
-            
-            # Get all chunks for this document
-            chunks = db.query(DB_Chunk).filter(DB_Chunk.doc_id == doc_uuid).all()
-            print(f"📝 Found {len(chunks)} chunks to update")
-            
-            # Method: Force complete rebuild of retrievers
-            print("🔧 Forcing complete rebuild of retrievers with updated metadata...")
-            
-            # Clear the cache to force fresh loading from database
-            retrieverconstruction.clear_cache()
-            
-            # Reset global state
-            retrieverconstruction.db_initialized = False
-            retrieverconstruction.faiss_db = None
-            retrieverconstruction.hybrid_retriever = None
-            retrieverconstruction.faiss_retriever = None
-            retrieverconstruction.bm25_retriever = None
-            
-            # Force reload of all documents from PostgreSQL (which now has updated metadata)
-            retrieverconstruction.all_documents = []
-            
-            print("🔄 Reconstructing retrievers from scratch...")
-            
-            # Reconstruct with fresh data from database
-            faiss_db, hybrid_retriever = retrieverconstruction.construct_retrievers(
-                include_postgres=True,
-                tenant_id=None  # Load all tenants to maintain complete index
-            )
-            
-            if faiss_db is None or hybrid_retriever is None:
-                raise ValueError("Failed to rebuild retrievers")
-            
-            print("✅ Retrievers rebuilt successfully with updated metadata")
-            
-            # Update the document status to indicate completion
+            document.is_public = is_public
             document.status = "processed"
             db.commit()
+            
+            # Instead of full rebuild, just update metadata in memory
+            from backend.rag import retrieverconstruction
+            retrieverconstruction.update_document_metadata(doc_uuid, {"is_public": is_public})
             
             return {
                 "status": "success",
                 "doc_id": str(doc_uuid),
                 "filename": document.filename,
                 "is_public": is_public,
-                "chunks_count": len(chunks),
-                "message": f"Document visibility updated to {'public' if is_public else 'private'}. Retrievers rebuilt with updated metadata."
+                "message": f"Document visibility updated efficiently"
             }
             
-        except Exception as db_error:
-            print(f"❌ Database error in visibility update: {db_error}")
-            db.rollback()
-            raise db_error
-        finally:
-            db.close()
-            
-    except Exception as e:
-        print(f"❌ Error updating document visibility: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"status": "error", "error": str(e)}
-    
+        except Exception as e:
+            print(f"❌ Error updating document visibility: {e}")
+            return {"status": "error", "error": str(e)}
 
+# Optimized query processing with caching
+@celery_app.task(name='process_query_optimized', bind=True)
+def process_query_optimized(self, query_id: str, query: str, tenant_id: str, user_id: str, 
+                           max_tokens: int = 500, temperature: float = 0.7, session_id: str = None):
+    """Process query with optimized memory management and caching"""
+    print(f"🔄 Processing query {query_id}: {query[:50]}...")
     
-@celery_app.task(name='process_uploaded_document')
-def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public):
-    """Process uploaded document - extract text, create chunks, etc."""
-    print(f"🔄 Task started for document: {filename} (doc_id: {doc_id})")
-    
-    try:
-        from backend.db.connection import SessionLocal
-        from backend.rag.add_document import process_uploaded_document as process_doc
-        from sqlalchemy import text
-        
-        print(f"📊 Processing document with {len(file_bytes)} bytes")
-        
-        # Create database session with error handling
-        db = SessionLocal()
-        
+    with manage_gpu_memory():
         try:
-            # Test database connection before proceeding (fixed SQL)
-            db.execute(text("SELECT 1")).fetchone()
-            print("✅ Database connection verified in task")
+            # Use cached response if available (implement query hash caching)
+            query_hash = _get_query_hash(query, tenant_id)
+            cached_response = _get_cached_response(query_hash)
             
-            # Convert file_bytes back to bytes if it was encoded as string
-            if isinstance(file_bytes, str):
-                file_bytes = file_bytes.encode("latin1")
-                print(f"🔧 Converted string to bytes: {len(file_bytes)} bytes")
+            if cached_response:
+                print(f"📋 Using cached response for query hash: {query_hash[:8]}")
+                response = cached_response
+            else:
+                # Initialize components lazily
+                _ensure_rag_initialized()
+                
+                # Generate response
+                from backend.response_generation.generator import generate_response
+                response = generate_response(query)
+                
+                # Cache the response
+                _cache_response(query_hash, response)
             
-            # Process the document (INCLUDE db parameter!)
+            # Save to database efficiently
+            with get_db_session() as db:
+                from backend.db.models import QueryLog as DB_QueryLog
+                
+                query_log_record = DB_QueryLog(
+                    id=UUID(query_id),
+                    user_id=UUID(user_id),
+                    session_id=UUID(session_id) if session_id and session_id != 'string' else None,
+                    query=query,
+                    response=response,
+                    timestamp=datetime.utcnow()
+                )
+                db.add(query_log_record)
+                db.commit()
+            
+            return {
+                "status": "success",
+                "query_id": query_id,
+                "query": query,
+                "response": response,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "session_id": session_id,
+                "worker": self.request.hostname,
+                "cached": cached_response is not None
+            }
+            
+        except Exception as e:
+            print(f"❌ Error processing query: {e}")
+            return {
+                "status": "error",
+                "query_id": query_id,
+                "query": query,
+                "error": str(e),
+                "worker": self.request.hostname
+            }
+
+# Optimized batch query processing
+@celery_app.task(name='batch_process_queries', bind=True)
+def batch_process_queries(self, queries_data: List[Dict], tenant_id: str, user_id: str):
+    """Process multiple queries efficiently in batch"""
+    print(f"🔄 Batch processing {len(queries_data)} queries")
+    
+    with manage_gpu_memory():
+        try:
+            _ensure_rag_initialized()  # Initialize once for all queries
+            
+            from backend.response_generation.generator import generate_response
+            
+            results = []
+            total_queries = len(queries_data)
+            
+            with get_db_session() as db:
+                from backend.db.models import QueryLog as DB_QueryLog
+                
+                for i, query_data in enumerate(queries_data):
+                    self.update_state(
+                        state='PROGRESS',
+                        meta={'current': i + 1, 'total': total_queries, 'status': f'Processing query {i+1}'}
+                    )
+                    
+                    try:
+                        query = query_data["query"]
+                        query_id = query_data["query_id"]
+                        
+                        # Check cache first
+                        query_hash = _get_query_hash(query, tenant_id)
+                        cached_response = _get_cached_response(query_hash)
+                        
+                        if cached_response:
+                            response = cached_response
+                        else:
+                            response = generate_response(query)
+                            _cache_response(query_hash, response)
+                        
+                        # Save to database
+                        query_log_record = DB_QueryLog(
+                            id=UUID(query_id),
+                            user_id=UUID(user_id),
+                            query=query,
+                            response=response,
+                            timestamp=datetime.utcnow()
+                        )
+                        db.add(query_log_record)
+                        
+                        results.append({
+                            "query_id": query_id,
+                            "query": query,
+                            "response": response,
+                            "status": "success",
+                            "cached": cached_response is not None
+                        })
+                        
+                    except Exception as e:
+                        results.append({
+                            "query_id": query_data.get("query_id", "unknown"),
+                            "query": query_data.get("query", ""),
+                            "status": "error",
+                            "error": str(e)
+                        })
+                
+                # Commit all at once
+                db.commit()
+            
+            return {
+                "status": "success",
+                "total_queries": total_queries,
+                "successful": len([r for r in results if r["status"] == "success"]),
+                "failed": len([r for r in results if r["status"] == "error"]),
+                "results": results
+            }
+            
+        except Exception as e:
+            print(f"❌ Error in batch query processing: {e}")
+            return {"status": "error", "error": str(e)}
+
+# Helper functions for caching and initialization
+def _get_query_hash(query: str, tenant_id: str) -> str:
+    """Generate hash for query caching"""
+    import hashlib
+    content = f"{query}:{tenant_id}"
+    return hashlib.md5(content.encode()).hexdigest()
+
+def _get_cached_response(query_hash: str) -> str:
+    """Get cached response (implement with Redis or memory cache)"""
+    # TODO: Implement with Redis for production
+    return None
+
+def _cache_response(query_hash: str, response: str):
+    """Cache response (implement with Redis or memory cache)"""
+    # TODO: Implement with Redis for production
+    pass
+
+def _ensure_rag_initialized():
+    """Ensure RAG components are initialized only once"""
+    try:
+        from backend.response_generation.generator import initialize_rag_chain, initialize_model
+        initialize_model()
+        initialize_rag_chain()
+    except Exception as e:
+        print(f"❌ Failed to initialize RAG components: {e}")
+        raise
+
+# Keep original tasks for backward compatibility but mark as deprecated
+@celery_app.task(name='process_uploaded_document', bind=True)
+def process_uploaded_document(self, file_bytes, filename, doc_id, tenant_id, user_id, is_public):
+    """Process a single uploaded document"""
+    print(f"🔄 Processing single document: {filename}")
+    
+    with manage_gpu_memory():
+        try:
+            from backend.rag.add_document import process_uploaded_document as process_doc
+            
+            # Process the document
             result = process_doc(
                 file_bytes=file_bytes,
                 filename=filename,
@@ -136,407 +338,92 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
                 tenant_id=tenant_id,
                 user_id=user_id,
                 is_public=is_public
-                # db=db  # Don't forget this!
-            )
-            print(f"✅ Document processing completed: {result}")
-            return result
-            
-        except Exception as db_error:
-            print(f"❌ Database error in task: {db_error}")
-            db.rollback()
-            raise db_error
-        finally:
-            db.close()
-            
-    except Exception as e:
-        print(f"❌ Error processing document: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"status": "error", "error": str(e)}
-    
-
-# Add this new task after your existing tasks
-
-@celery_app.task(name='scrape_link')
-def scrape_link(link_id: str, url: str, depth: int, excluded_sublinks: str, tenant_id: str, user_id: str):
-    """Scrape a website link and add documents to the knowledge base"""
-    print(f"🔄 Starting scraping for link {link_id}: {url}")
-    
-    try:
-        from backend.db.connection import SessionLocal
-        from backend.db.models import Link, Document as DB_Document, Chunk as DB_Chunk
-        from backend.rag.scraper import crawl_website
-        from backend.rag import retrieverconstruction
-        from langchain_core.documents import Document as LC_Document
-        from langchain.text_splitter import TokenTextSplitter
-        from uuid import UUID, uuid4
-        from datetime import datetime
-        
-        db = SessionLocal()
-        
-        try:
-            # Get the link record
-            link_uuid = UUID(link_id)
-            link = db.query(Link).filter(Link.id == link_uuid).first()
-            
-            if not link:
-                raise ValueError(f"Link with ID {link_id} not found")
-            
-            print(f"📄 Scraping: {link.name or url}")
-            
-            # Perform the scraping
-            scraped_docs = crawl_website(
-                start_url=url,
-                excluded_sublinks=excluded_sublinks,
-                depth=depth
             )
             
-            if not scraped_docs:
-                link.status = "completed"
-                link.last_scraped = datetime.utcnow()
-                db.commit()
-                return {
-                    "status": "success",
-                    "message": "No content found to scrape",
-                    "docs_scraped": 0
-                }
-            
-            print(f"📝 Scraped {len(scraped_docs)} pages")
-            
-            # Process scraped content into chunks
-            splitter = TokenTextSplitter(chunk_size=256, chunk_overlap=64)
-            
-            total_chunks = 0
-            for doc_data in scraped_docs:
-                # Create a document record for each scraped page
-                doc_id = uuid4()
-                
-                # Create document in database
-                document = DB_Document(
-                    id=doc_id,
-                    tenant_id=UUID(tenant_id),
-                    user_id=UUID(user_id),
-                    filename=f"scraped_{doc_data['url'].split('/')[-1] or 'page'}.html",
-                    filetype=".html",
-                    size=len(doc_data['content']),
-                    is_public=False,  # Scraped content is private by default
-                    status="processed",
-                    upload_time=datetime.utcnow()
-                )
-                db.add(document)
-                db.flush()  # Get the ID
-                
-                # Split content into chunks
-                chunks = splitter.split_text(doc_data['content'])
-                
-                # Save chunks to database
-                for chunk_text in chunks:
-                    chunk = DB_Chunk(
-                        doc_id=document.id,
-                        text=chunk_text,
-                        language="en"  # Assume English for web content
-                    )
-                    db.add(chunk)
-                    total_chunks += 1
-                
-                print(f"📄 Created document {document.filename} with {len(chunks)} chunks")
-            
-            # Commit all database changes
-            db.commit()
-            print(f"💾 Saved {len(scraped_docs)} documents with {total_chunks} total chunks")
-            
-            # Update vector store
-            print("🔧 Updating vector store with scraped content...")
-            
-            # Force rebuild of retrievers to include new content
-            retrieverconstruction.clear_cache()
-            retrieverconstruction.db_initialized = False
-            retrieverconstruction.faiss_db = None
-            retrieverconstruction.hybrid_retriever = None
-            
-            # Reconstruct with new data
-            faiss_db, hybrid_retriever = retrieverconstruction.construct_retrievers(
-                include_postgres=True
-            )
-            
-            if faiss_db is None:
-                print("⚠️ Warning: Failed to update vector store")
-            else:
-                print("✅ Vector store updated with scraped content")
-            
-            # Update link status
-            link.status = "completed"
-            link.last_scraped = datetime.utcnow()
-            link.updated_at = datetime.utcnow()
-            db.commit()
+            # Rebuild retrievers
+            _rebuild_retrievers_once()
             
             return {
                 "status": "success",
-                "link_id": link_id,
-                "url": url,
-                "docs_scraped": len(scraped_docs),
-                "total_chunks": total_chunks,
-                "message": f"Successfully scraped {len(scraped_docs)} pages with {total_chunks} chunks"
+                "doc_id": doc_id,
+                "result": result
             }
             
-        except Exception as db_error:
-            print(f"❌ Database error in scraping: {db_error}")
-            
-            # Update link status to error
-            try:
-                link = db.query(Link).filter(Link.id == UUID(link_id)).first()
-                if link:
-                    link.status = "error"
-                    link.updated_at = datetime.utcnow()
-                    db.commit()
-            except:
-                pass
-            
-            db.rollback()
-            raise db_error
-        finally:
-            db.close()
-            
-    except Exception as e:
-        print(f"❌ Error scraping link: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"status": "error", "error": str(e)}
-    
+        except Exception as e:
+            print(f"❌ Error processing document {filename}: {e}")
+            return {
+                "status": "error",
+                "doc_id": doc_id,
+                "error": str(e)
+            }
 
-# Add this task to your existing tasks.py file
+@celery_app.task(name='update_document_visibility')
+def update_document_visibility(doc_id: str, is_public: bool, tenant_id: str):
+    """DEPRECATED: Use update_document_visibility_optimized for better efficiency"""
+    return update_document_visibility_optimized(doc_id, is_public, tenant_id)
 
-@celery_app.task(name='process_query', bind=True)
+# Keep only this definition (starting at line 352)
+@celery_app.task(name='process_query', bind=True) 
 def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id: str, 
                       max_tokens: int = 500, temperature: float = 0.7, session_id: str = None):
     """Process a user query using RAG pipeline asynchronously"""
     print(f"🔄 Processing query {query_id}: {query[:50]}...")
-    print(f"🔧 Task running in worker: {self.request.hostname}")
     
-    try:
-        # Import here to avoid import issues in workers
-        from backend.response_generation.generator import generate_response
-        from backend.db.connection import SessionLocal
-        from backend.db.models import QueryLog as DB_QueryLog
-        from uuid import UUID
-        from datetime import datetime
-        
-        # Ensure everything is initialized
-        print(f"🔧 Ensuring RAG components are initialized...")
+    with manage_gpu_memory():
         try:
-            from backend.response_generation.generator import initialize_rag_chain, initialize_model
+            # Use cached response if available
+            query_hash = _get_query_hash(query, tenant_id)
+            cached_response = _get_cached_response(query_hash)
             
-            # Force initialization if needed
-            initialize_model()
-            initialize_rag_chain()
-            print(f"✅ RAG components verified/initialized")
-            
-        except Exception as init_error:
-            print(f"❌ Failed to initialize RAG components: {init_error}")
-            import traceback
-            traceback.print_exc()
-            # Don't fail here, let generate_response handle it
-        
-        # Generate the response using RAG
-        print(f"🤖 Generating response for query: {query}")
-        
-        # Add timeout and better error handling
-        try:
-            response = generate_response(query)
-        except Exception as gen_error:
-            print(f"❌ Error in generate_response: {gen_error}")
-            import traceback
-            traceback.print_exc()
-            response = f"I apologize, but I encountered an error while processing your query: {str(gen_error)}"
-        
-        if response is None:
-            print("⚠️ generate_response returned None")
-            response = "I apologize, but I was unable to generate a response to your query. Please try again."
-        
-        if not response.strip():
-            print("⚠️ generate_response returned empty string")
-            response = "I apologize, but I couldn't generate a meaningful response to your query. Please try rephrasing your question."
-        
-        print(f"✅ Generated response: {response[:100]}...")
-        
-        # Save query and response to database using query_logs table
-        try:
-            db = SessionLocal()
-            
-            # Create query log record using the correct table structure
-            query_log_record = DB_QueryLog(
-                id=UUID(query_id),
-                user_id=UUID(user_id),
-                session_id=UUID(session_id) if session_id and session_id != 'string' else None,
-                query=query,
-                response=response,
-                timestamp=datetime.utcnow()
-            )
-            db.add(query_log_record)
-            db.commit()
-            print(f"💾 Query and response saved to query_logs table")
-            
-        except Exception as db_error:
-            print(f"⚠️ Warning: Failed to save to database: {db_error}")
-            import traceback
-            traceback.print_exc()
-            # Continue even if database save fails
-        finally:
-            if 'db' in locals():
-                db.close()
-        
-        result = {
-            "status": "success",
-            "query_id": query_id,
-            "query": query,
-            "response": response,
-            "tenant_id": tenant_id,
-            "user_id": user_id,
-            "session_id": session_id,
-            "worker": self.request.hostname
-        }
-        
-        print(f"✅ Query processing completed successfully")
-        print(f"📝 Response: {response[:100]}...")
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        return result
-        
-    except Exception as e:
-        print(f"❌ Error processing query: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        return {
-            "status": "error",
-            "query_id": query_id,
-            "query": query,
-            "error": str(e),
-            "worker": self.request.hostname
-        }
-
-@celery_app.task(name='speech_to_text')
-def speech_to_text_task(stt_id: str, audio_bytes: str, filename: str, language: str, tenant_id: str, user_id: str):
-    """Convert speech to text using Whisper or other STT engine"""
-    print(f"🎤 Processing STT request {stt_id}: {filename}")
-
-@celery_app.task(name='generate_response_async', bind=True)
-def generate_response_async(self, query: str, use_reranking: bool = False, top_k: int = 2):
-    """
-    Asynchronously generate a response using RAG.
-    
-    Args:
-        query (str): The input query
-        use_reranking (bool): Whether to use reranking
-        top_k (int): Number of top documents for reranking
-    
-    Returns:
-        dict: Response with generated text and metadata
-    """
-    try:
-        print(f"🤖 Starting response generation for query: {query[:100]}...")
-        
-        # Update task state to indicate processing has started
-        self.update_state(
-            state='PROCESSING',
-            meta={'message': 'Initializing response generation...', 'progress': 10}
-        )
-        
-        # Import here to avoid circular imports
-        from backend.response_generation.generator import generate_response, generate_response_with_reranking
-        
-        self.update_state(
-            state='PROCESSING',
-            meta={'message': 'Retrieving relevant documents...', 'progress': 30}
-        )
-        
-        # Generate response based on reranking preference
-        if use_reranking:
-            response = generate_response_with_reranking(query, top_k=top_k)
-        else:
-            response = generate_response(query)
-        
-        self.update_state(
-            state='PROCESSING',
-            meta={'message': 'Generating final response...', 'progress': 80}
-        )
-        
-        result = {
-            "status": "success",
-            "query": query,
-            "response": response,
-            "use_reranking": use_reranking,
-            "top_k": top_k if use_reranking else None,
-            "task_id": self.request.id
-        }
-        
-        print(f"✅ Response generated successfully")
-        return result
-        
-    except Exception as e:
-        print(f"❌ Error generating response: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        return {
-            "status": "error",
-            "error": str(e),
-            "query": query,
-            "task_id": self.request.id
-        }
-
-@celery_app.task(name='batch_generate_responses')
-def batch_generate_responses(queries: list, use_reranking: bool = False, top_k: int = 2):
-    """
-    Generate responses for multiple queries in batch.
-    
-    Args:
-        queries (list): List of query strings
-        use_reranking (bool): Whether to use reranking
-        top_k (int): Number of top documents for reranking
-    
-    Returns:
-        dict: Batch results
-    """
-    try:
-        print(f"🔄 Processing batch of {len(queries)} queries...")
-        
-        from backend.response_generation.generator import generate_response, generate_response_with_reranking
-        
-        results = []
-        for i, query in enumerate(queries):
-            try:
-                if use_reranking:
-                    response = generate_response_with_reranking(query, top_k=top_k)
-                else:
-                    response = generate_response(query)
+            if cached_response:
+                print(f"📋 Using cached response for query hash: {query_hash[:8]}")
+                response = cached_response
+            else:
+                # Initialize components lazily
+                _ensure_rag_initialized()
                 
-                results.append({
-                    "query": query,
-                    "response": response,
-                    "status": "success"
-                })
+                # Generate response
+                from backend.response_generation.generator import generate_response
+                response = generate_response(query)
                 
-            except Exception as query_error:
-                results.append({
-                    "query": query,
-                    "response": None,
-                    "status": "error",
-                    "error": str(query_error)
-                })
-        
-        return {
-            "status": "completed",
-            "total_queries": len(queries),
-            "successful": len([r for r in results if r["status"] == "success"]),
-            "failed": len([r for r in results if r["status"] == "error"]),
-            "results": results
-        }
-        
-    except Exception as e:
-        print(f"❌ Error in batch processing: {e}")
-        return {
-            "status": "error",
-            "error": str(e),
-            "total_queries": len(queries)
-        }
+                # Cache the response
+                _cache_response(query_hash, response)
+            
+            # Save to database efficiently
+            with get_db_session() as db:
+                from backend.db.models import QueryLog as DB_QueryLog
+                
+                query_log_record = DB_QueryLog(
+                    id=UUID(query_id),
+                    user_id=UUID(user_id),
+                    session_id=UUID(session_id) if session_id and session_id != 'string' else None,
+                    query=query,
+                    response=response,
+                    timestamp=datetime.utcnow()
+                )
+                db.add(query_log_record)
+                db.commit()
+            
+            return {
+                "status": "success",
+                "query_id": query_id,
+                "query": query,
+                "response": response,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "session_id": session_id,
+                "worker": self.request.hostname,
+                "cached": cached_response is not None
+            }
+            
+        except Exception as e:
+            print(f"❌ Error processing query: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "query_id": query_id,
+                "query": query,
+                "error": str(e),
+                "worker": self.request.hostname
+            }

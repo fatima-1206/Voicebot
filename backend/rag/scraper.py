@@ -7,6 +7,12 @@ from langchain.schema import Document
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import OpenAIEmbeddings
 
+import os
+from pathlib import Path
+
+# Get the absolute path to the project root
+PROJECT_ROOT = Path(__file__).parent.parent.parent  # Goes up 3 levels from this file
+#
 # Base URL of your university website
 
 # Store scraped documents
@@ -14,7 +20,7 @@ scraped_docs = []
 
 # Keep track of visited URLs to avoid re-scraping
 visited_urls = set()
-scraped_data_file = "backend/rag/scraped_docs.json"
+scraped_data_file = str(PROJECT_ROOT / "backend/rag/scraped_docs.json")
 
 # Function to fetch page content
 def fetch_page(url):

@@ -32,18 +32,24 @@ from backend.db.connection import SessionLocal
 from backend.db.models import Document as DB_Document, Chunk as DB_Chunk
 from sqlalchemy.orm import Session, joinedload
 
+import os
+from pathlib import Path
+
+# Get the absolute path to the project root
+PROJECT_ROOT = Path(__file__).parent.parent.parent  # Goes up 3 levels from this file
+#
 splitter = TokenTextSplitter(chunk_size=256, chunk_overlap=64)
 
-csv_path = "backend/rag/knowledge_base/links.csv"
-VECSTORE_PATH = "backend/rag/vector_stores/faiss_index"
-config_path = "config.json"
-cache_file = "backend/rag/cache/cached_kb.pkl"
-RETRIEVER_STATE_FILE = "backend/rag/cache/retriever_state.pkl"
+csv_path = str(PROJECT_ROOT / "backend/rag/knowledge_base/links.csv")
+VECSTORE_PATH = str(PROJECT_ROOT / "backend/rag/vector_stores/faiss_index")
+config_path = str(PROJECT_ROOT / "config.json")
+cache_file = str(PROJECT_ROOT / "backend/rag/cache/cached_kb.pkl")
+RETRIEVER_STATE_FILE = str(PROJECT_ROOT / "backend/rag/cache/retriever_state.pkl")
 
 with open(config_path, "r") as f:
     config = json.load(f)
 
-folder_path = "backend/rag/knowledge_base"
+folder_path = str(PROJECT_ROOT / "backend/rag/knowledge_base")
 all_documents = []
 
 # Initialize embeddings as None - will be loaded only when needed
@@ -170,7 +176,7 @@ def load_documents_from_postgres(db: Session = None, tenant_id: str = None):
         if close_db:
             db.close()
 
-def load_scraped_documents(start_url:str, excluded_sublinks:str, depth=-1, json_path = "backend/rag/scraped_docs.json"):
+def load_scraped_documents(start_url:str, excluded_sublinks:str, depth=-1, json_path =str(PROJECT_ROOT / "backend/rag/scraped_docs.json")):
     """
         Takes a url, crawls the website and saves all documents extracted from it to the json file
     """
@@ -186,7 +192,7 @@ def load_scraped_documents(start_url:str, excluded_sublinks:str, depth=-1, json_
 
         print(f"  -> Crawled and chunked {len(scraped_docs)} scraped web documents")
 
-def scrape_links_from_csv(csv_path=csv_path, json_path = "backend/rag/scraped_docs.json"):
+def scrape_links_from_csv(csv_path=csv_path, json_path = str(PROJECT_ROOT / "backend/rag/scraped_docs.json")):
     """
     for all the links in the CSV file, scrape the website and save the documents
     """
@@ -220,7 +226,7 @@ def scrape_links_from_csv(csv_path=csv_path, json_path = "backend/rag/scraped_do
             else:
                 load_scraped_documents(start_url=start_url, excluded_sublinks=row["excluded_sublinks"])
 
-def load_documents(include_postgres=True, tenant_id=None):
+def load_documents(include_postgres=True):
     global all_documents, db_initialized
 
     if db_initialized:
@@ -234,7 +240,7 @@ def load_documents(include_postgres=True, tenant_id=None):
         db_initialized = True
         # Still load PostgreSQL documents even if cache exists, as they might be new
         if include_postgres:
-            load_documents_from_postgres(tenant_id=tenant_id)
+            load_documents_from_postgres()
         return
 
     # If cache is not available or invalid, load from files
@@ -284,7 +290,7 @@ def load_documents(include_postgres=True, tenant_id=None):
 
     # Load documents from PostgreSQL
     if include_postgres:
-        load_documents_from_postgres(tenant_id=tenant_id)
+        load_documents_from_postgres()
         print(f"Total documents loaded after PostgreSQL: {len(all_documents)}")
 
     # Wikipedia documents
@@ -357,7 +363,7 @@ def construct_retrievers(include_postgres=True, tenant_id=None):
         include_postgres: Whether to include documents from PostgreSQL
         tenant_id: Filter PostgreSQL documents by tenant_id (optional)
     """
-    global db_initialized, faiss_db, hybrid_retriever
+    global db_initialized, faiss_db, hybrid_retriever, faiss_retriever, bm25_retriever
 
     faiss_db = load_vectorstore()
     # the folder hash must be checked to make sure the faiss index is still valid
@@ -365,29 +371,29 @@ def construct_retrievers(include_postgres=True, tenant_id=None):
         print("FAISS vector store loaded from disk.")
         # Still load PostgreSQL documents even if cache exists
         if include_postgres:
-            load_documents_from_postgres(tenant_id=tenant_id)
+            load_documents_from_postgres()
     else:
-        if db_initialized:
+        if db_initialized and faiss_db is not None and hybrid_retriever is not None:
             print("Retrievers already constructed. Skipping.")
-            return faiss_db, bm25_retriever, faiss_retriever
+            return faiss_db, hybrid_retriever  # Fix: Use consistent return signature
 
-        load_documents(include_postgres=include_postgres, tenant_id=tenant_id)
+        load_documents(include_postgres=include_postgres)
         
         if not all_documents:
             print("No documents loaded. Cannot construct retrievers.")
-            return None, None, None
+            return None, None  # Fix: Use consistent return signature (2 values)
 
         # Step 2: Create FAISS vector store
         print("Creating FAISS vector store...")
-        embeddings = get_embeddings()  # Add this line
+        embeddings = get_embeddings()
         faiss_db = FAISS.from_documents(all_documents, embeddings)
         print("FAISS vector store created successfully.")
 
     if not all_documents:
-        load_documents(include_postgres=include_postgres, tenant_id=tenant_id)
+        load_documents(include_postgres=include_postgres, )
         if not all_documents:
             print("No documents loaded. Cannot construct retrievers.")
-            return None, None, None
+            return None, None  # Fix: Use consistent return signature
 
     # Step 2.1: Create FAISS retriever
     print("Creating FAISS retriever...")
@@ -397,24 +403,23 @@ def construct_retrievers(include_postgres=True, tenant_id=None):
     # Step 3: Create BM25 retriever
     print("Creating BM25 retriever...")
     bm25_retriever = BM25Retriever.from_documents(all_documents)
-    bm25_retriever.k = 5  # Set number of documents to retrieve
+    bm25_retriever.k = 5
     print("BM25 retriever created successfully.")
     
     print("Creating hybrid retriever (EnsembleRetriever)...")
     hybrid_retriever = EnsembleRetriever(
-    retrievers=[faiss_retriever, bm25_retriever],
-    weights=[config["faissWeight"], config["bm25Weight"]]
+        retrievers=[faiss_retriever, bm25_retriever],
+        weights=[config["faissWeight"], config["bm25Weight"]]
     )
     print("Hybrid retriever created successfully.")
 
-    save_vectorstore(faiss_db)  # Save the FAISS vector store to disk
+    save_vectorstore(faiss_db)
 
     db_initialized = True
     print("Retrievers constructed successfully.")
-    unload_documents_and_embeddings(clear_faiss=False)  # Clear documents and embeddings after retrievers are constructed
+    unload_documents_and_embeddings(clear_faiss=False)
     
-    return faiss_db, hybrid_retriever
-
+    return faiss_db, hybrid_retriever  # Fix: Consistent return signature
 def save_vectorstore(faiss_db):
     if not os.path.exists(VECSTORE_PATH):
         os.makedirs(VECSTORE_PATH)

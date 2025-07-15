@@ -134,8 +134,8 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
                 doc_id=doc_id,
                 tenant_id=tenant_id,
                 user_id=user_id,
-                is_public=is_public,
-                db=db  # Don't forget this!
+                is_public=is_public
+                # db=db  # Don't forget this!
             )
             print(f"✅ Document processing completed: {result}")
             return result

@@ -104,6 +104,19 @@ def worker_ready_handler(sender=None, **kwargs):
         import traceback
         traceback.print_exc()
     
+    # Step 4: Initialize Reranker Model
+    print("🔧 Initializing reranker model...")
+    try:
+        from backend.response_generation.reranker import load_reranker_model
+        
+        load_reranker_model()
+        print("✅ Reranker model initialized in Celery worker")
+        
+    except Exception as reranker_error:
+        print(f"❌ Reranker model initialization failed: {reranker_error}")
+        import traceback
+        traceback.print_exc()
+    
     print("🎉 Celery worker initialization complete!")
     print("=" * 50)
 

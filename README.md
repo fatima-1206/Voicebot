@@ -35,3 +35,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+To use the api points with the locks in front of them, you must get authenticated first.
+
+To get authenticated use the login endpoint to get an access token. Copy the token and scroll to the top of the swagger ui page. Click on the button labled `Authorize` and past the token in the Value field. Now after closing it, you should be able to use all api endpoints.

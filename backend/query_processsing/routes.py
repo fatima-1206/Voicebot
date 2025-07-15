@@ -8,6 +8,9 @@ from backend.workers.tasks import process_query_task
 from uuid import uuid4
 import json
 
+with open('config.json') as config_file:
+    config = json.load(config_file)
+
 router = APIRouter()
 
 def get_db():
@@ -19,8 +22,8 @@ def get_db():
 
 class QueryRequest(BaseModel):
     query: str
-    max_tokens: Optional[int] = 500
-    temperature: Optional[float] = 0.7
+    max_tokens: Optional[int] = config.get("max_input_tokens", 100)
+    temperature: Optional[float] = config.get("temperature", 0.7)
     session_id: Optional[str] = None
 
 class QuerySubmissionResponse(BaseModel):
@@ -49,6 +52,8 @@ async def submit_query(
             session_id=request.session_id
         )
         
+        
+
         return QuerySubmissionResponse(
             query_id=query_id,
             status="submitted",

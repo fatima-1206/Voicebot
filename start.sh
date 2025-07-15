@@ -156,10 +156,18 @@ source venv/bin/activate
 start_redis
 
 # Start Celery worker
+# echo -e "${YELLOW}🔄 Starting Celery worker(s)...${NC}"
+# celery -A backend.workers.celery_worker.celery_app worker \
+#     --loglevel=info \
+#     --concurrency=$CELERY_WORKERS \
+#     --hostname=voicebot@%h &
+# CELERY_PID=$!
+# to prevent the issues caused be forking
 echo -e "${YELLOW}🔄 Starting Celery worker(s)...${NC}"
 celery -A backend.workers.celery_worker.celery_app worker \
     --loglevel=info \
     --concurrency=$CELERY_WORKERS \
+    --pool=threads \
     --hostname=voicebot@%h &
 CELERY_PID=$!
 

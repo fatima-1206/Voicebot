@@ -26,6 +26,8 @@ celery_app.conf.update(
     result_serializer='json',
     timezone='UTC',
     enable_utc=True,
+    worker_pool='threads',  # Add this line
+    worker_concurrency=1,   # Add this line
 )
 
 # Initialize everything when worker starts

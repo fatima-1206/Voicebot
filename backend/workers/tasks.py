@@ -306,7 +306,75 @@ def process_query_task(query_id: str, query: str, tenant_id: str, user_id: str,
     """Process a user query using RAG pipeline asynchronously"""
     print(f"🔄 Processing query {query_id}: {query[:50]}...")
     
-    pass
+    try:
+        # Import here to avoid circular imports
+        from backend.response_generation.generator import generate_response
+        
+        # Generate the response using RAG
+        print(f"🤖 Generating response for query: {query}")
+        response = generate_response(query)
+        
+        # Save query and response to database if needed
+        try:
+            from backend.db.connection import SessionLocal
+            from backend.db.models import Query as DB_Query
+            from uuid import UUID
+            from datetime import datetime
+            
+            db = SessionLocal()
+            
+            # Create query record - check if Query model exists first
+            try:
+                query_record = DB_Query(
+                    id=UUID(query_id),
+                    tenant_id=UUID(tenant_id),
+                    user_id=UUID(user_id),
+                    query_text=query,
+                    response_text=response,
+                    session_id=session_id,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    created_at=datetime.utcnow()
+                )
+                db.add(query_record)
+                db.commit()
+                print(f"💾 Query and response saved to database")
+            except Exception as model_error:
+                print(f"⚠️ Query model may not exist in database: {model_error}")
+                # Continue without saving to database
+            
+        except Exception as db_error:
+            print(f"⚠️ Warning: Failed to save to database: {db_error}")
+            # Continue even if database save fails
+        finally:
+            if 'db' in locals():
+                db.close()
+        
+        result = {
+            "status": "success",
+            "query_id": query_id,
+            "query": query,
+            "response": response,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "session_id": session_id
+        }
+        
+        print(f"✅ Query processing completed successfully")
+        print(f"📝 Response: {response[:100]}...")
+        return result
+        
+    except Exception as e:
+        print(f"❌ Error processing query: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        return {
+            "status": "error",
+            "query_id": query_id,
+            "query": query,
+            "error": str(e)
+        }
 
 @celery_app.task(name='speech_to_text')
 def speech_to_text_task(stt_id: str, audio_bytes: str, filename: str, language: str, tenant_id: str, user_id: str):

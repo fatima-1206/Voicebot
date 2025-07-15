@@ -68,27 +68,27 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "query_processing"}
 
-@router.post("/generate-async")
-async def generate_response_async(request: dict):
-    """Start async response generation"""
-    query = request.get("query", "")
-    use_reranking = request.get("use_reranking", False)
-    top_k = request.get("top_k", 2)
+# @router.post("/generate-async")
+# async def generate_response_async(request: dict):
+#     """Start async response generation"""
+#     query = request.get("query", "")
+#     use_reranking = request.get("use_reranking", False)
+#     top_k = request.get("top_k", 2)
     
-    if not query:
-        raise HTTPException(status_code=400, detail="Query is required")
+#     if not query:
+#         raise HTTPException(status_code=400, detail="Query is required")
     
-    # Submit task to Celery
-    task = celery_app.send_task(
-        'generate_response_async',
-        args=[query, use_reranking, top_k]
-    )
+#     # Submit task to Celery
+#     task = celery_app.send_task(
+#         'generate_response_async',
+#         args=[query, use_reranking, top_k]
+#     )
     
-    return {
-        "task_id": task.id,
-        "status": "submitted",
-        "message": "Response generation started"
-    }
+#     return {
+#         "task_id": task.id,
+#         "status": "submitted",
+#         "message": "Response generation started"
+#     }
 
 @router.get("/task-status/{task_id}")
 async def get_task_status(task_id: str):
@@ -127,25 +127,25 @@ async def get_task_status(task_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error checking task status: {str(e)}")
 
-@router.post("/generate-batch")
-async def generate_batch_responses(request: dict):
-    """Generate responses for multiple queries"""
-    queries = request.get("queries", [])
-    use_reranking = request.get("use_reranking", False)
-    top_k = request.get("top_k", 2)
+# @router.post("/generate-batch")
+# async def generate_batch_responses(request: dict):
+#     """Generate responses for multiple queries"""
+#     queries = request.get("queries", [])
+#     use_reranking = request.get("use_reranking", False)
+#     top_k = request.get("top_k", 2)
     
-    if not queries or not isinstance(queries, list):
-        raise HTTPException(status_code=400, detail="Queries list is required")
+#     if not queries or not isinstance(queries, list):
+#         raise HTTPException(status_code=400, detail="Queries list is required")
     
-    # Submit batch task to Celery
-    task = celery_app.send_task(
-        'batch_generate_responses',
-        args=[queries, use_reranking, top_k]
-    )
+#     # Submit batch task to Celery
+#     task = celery_app.send_task(
+#         'batch_generate_responses',
+#         args=[queries, use_reranking, top_k]
+#     )
     
-    return {
-        "task_id": task.id,
-        "status": "submitted",
-        "total_queries": len(queries),
-        "message": "Batch processing started"
-    }
+#     return {
+#         "task_id": task.id,
+#         "status": "submitted",
+#         "total_queries": len(queries),
+#         "message": "Batch processing started"
+#     }

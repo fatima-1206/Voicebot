@@ -23,6 +23,8 @@ from io import BytesIO
 import tempfile
 import json
 from celery import Celery
+import torch
+import gc
 
 # Import config for weights
 with open("config.json", "r") as f:
@@ -34,32 +36,30 @@ celery_app = Celery('tasks', broker='redis://localhost:6379/0')
 db = None
 
 @celery_app.task(name='process_uploaded_document')
-def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public, db: Session):
+def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public):
     """
     Process an uploaded document and add it to both the vector database and PostgreSQL.
     """
-    temp_path = None  # Initialize at the top to avoid UnboundLocalError
+    from backend.db.connection import SessionLocal
+    
+    db = SessionLocal()  # Create session inside task
+    temp_path = None
     
     try:
-        print(f"🔄 Task started for document: {filename}")
+        print(f"🔄 Task started for document: {filename} (doc_id: {doc_id})")
         
         # Import and get fresh references to retrievers
         from backend.rag import retrieverconstruction
         
-        # Get or initialize retrievers
+        # Get or initialize retrievers (this will use caching now)
         faiss_db, hybrid_retriever = retrieverconstruction.get_retrievers()
         
         if faiss_db is None:
-            print("🔧 FAISS not available, constructing retrievers...")
-            faiss_db, hybrid_retriever = retrieverconstruction.construct_retrievers()
-            if faiss_db is None:
-                raise ValueError("Failed to initialize FAISS vector store")
+            print("❌ Failed to initialize FAISS vector store")
+            raise ValueError("Failed to initialize FAISS vector store")
         
         print(f"✅ Retrieved FAISS DB: {faiss_db is not None}")
         print(f"✅ Retrieved Hybrid Retriever: {hybrid_retriever is not None}")
-        
-        # Get BM25 retriever from the module
-        bm25_retriever = retrieverconstruction.bm25_retriever
         
         # Convert string UUIDs to UUID objects
         doc_id = UUID(doc_id) if isinstance(doc_id, str) else doc_id
@@ -102,34 +102,30 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
 
         print(f"📝 Created {len(chunks)} chunks from document")
 
-        # Step 4: Add to FAISS vectorstore
-        print(f"📝 Adding {len(chunks)} chunks to FAISS vector store...")
-        faiss_db.add_documents(chunks)
-        
-        # Save the updated vectorstore
-        retrieverconstruction.save_vectorstore(faiss_db)
-        print("✅ Chunks added to FAISS successfully")
+        # Step 4: Add to FAISS vectorstore and update retrievers
+        if len(chunks) > 0:
+            print(f"📝 Adding {len(chunks)} chunks to FAISS vector store...")
+            faiss_db.add_documents(chunks)
+            
+            # Save the updated vectorstore
+            retrieverconstruction.save_vectorstore(faiss_db)
+            print("✅ Chunks added to FAISS successfully")
 
-        # Step 5: Re-create only the FAISS retriever to reflect the updated index
-        faiss_retriever = faiss_db.as_retriever(search_type="similarity", search_kwargs={"k": 5})
-
-        # Step 6: Re-create hybrid retriever
-        if bm25_retriever is not None:
-            from langchain.retrievers import EnsembleRetriever
-            hybrid_retriever = EnsembleRetriever(
-                retrievers=[faiss_retriever, bm25_retriever],
-                weights=[config["faissWeight"], config["bm25Weight"]]
-            )
-            print("🔄 Updated hybrid retriever with new FAISS documents (BM25 kept static)")
+            # Step 5: Update retrievers (new FAISS + existing BM25)
+            faiss_retriever, hybrid_retriever = retrieverconstruction.update_faiss_and_hybrid_retriever(faiss_db)
+            
+            if faiss_retriever is not None and hybrid_retriever is not None:
+                # Update the global variables in the module
+                retrieverconstruction.faiss_db = faiss_db
+                retrieverconstruction.hybrid_retriever = hybrid_retriever
+                retrieverconstruction.faiss_retriever = faiss_retriever
+                print("✅ Retrievers updated efficiently")
+            else:
+                print("❌ Failed to update retrievers")
         else:
-            print("⚠️ Warning: BM25 retriever not available, using only FAISS")
-            hybrid_retriever = faiss_retriever
+            print("⚠️ Warning: No chunks created from document, skipping FAISS update")
 
-        # Update the global variables in the module
-        retrieverconstruction.faiss_db = faiss_db
-        retrieverconstruction.hybrid_retriever = hybrid_retriever
-
-        # Step 7: Update document metadata in PostgreSQL (don't create new, update existing)
+        # Step 8: Update document metadata in PostgreSQL (don't create new, update existing)
         print(f"💾 Updating document metadata in PostgreSQL...")
         
         # Get the existing document record
@@ -159,7 +155,7 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         
         db.flush()
 
-        # Step 8: Store chunks in database
+        # Step 9: Store chunks in database
         print(f"💾 Saving {len(chunks)} chunks to PostgreSQL...")
         chunks_saved = 0
         for i, chunk in enumerate(chunks):
@@ -192,9 +188,15 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         raise e
     
     finally:
-        # Clean up temp file (now temp_path is always defined)
+        db.close()  # Always close the session
+        # Clean up temp file and free memory
         if temp_path and os.path.exists(temp_path):
             try:
                 os.unlink(temp_path)
             except Exception as e:
                 print(f"⚠️ Warning: Could not delete temp file {temp_path}: {e}")
+        
+        # Clear GPU cache to free memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()

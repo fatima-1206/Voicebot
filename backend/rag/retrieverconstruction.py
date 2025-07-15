@@ -38,6 +38,7 @@ csv_path = "backend/rag/knowledge_base/links.csv"
 VECSTORE_PATH = "backend/rag/vector_stores/faiss_index"
 config_path = "config.json"
 cache_file = "backend/rag/cache/cached_kb.pkl"
+RETRIEVER_STATE_FILE = "backend/rag/cache/retriever_state.pkl"
 
 with open(config_path, "r") as f:
     config = json.load(f)
@@ -45,10 +46,11 @@ with open(config_path, "r") as f:
 folder_path = "backend/rag/knowledge_base"
 all_documents = []
 
+# Initialize embeddings as None - will be loaded only when needed
+embeddings = None
 embedding_model_name = "intfloat/multilingual-e5-base"
-embeddings = HuggingFaceEmbeddings(model_name=embedding_model_name)
 
-# Global variables
+# Global variables - these will be loaded from persistent storage
 db_initialized = False
 faiss_db = None
 hybrid_retriever = None
@@ -57,6 +59,44 @@ bm25_retriever = None
 
 # Keep track of visited URLs to avoid re-scraping
 visited_urls = set()
+
+def get_embeddings():
+    """Lazy load embeddings to avoid loading them in every worker"""
+    global embeddings
+    if embeddings is None:
+        print(f"🔧 Loading embedding model: {embedding_model_name}")
+        embeddings = HuggingFaceEmbeddings(model_name=embedding_model_name)
+    return embeddings
+
+def save_retriever_state():
+    """Save the current state of retrievers to disk"""
+    try:
+        state = {
+            'db_initialized': db_initialized,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        os.makedirs(os.path.dirname(RETRIEVER_STATE_FILE), exist_ok=True)
+        with open(RETRIEVER_STATE_FILE, 'wb') as f:
+            pickle.dump(state, f)
+        print(f"💾 Retriever state saved to {RETRIEVER_STATE_FILE}")
+    except Exception as e:
+        print(f"⚠️ Failed to save retriever state: {e}")
+
+def load_retriever_state():
+    """Load the retriever state from disk"""
+    global db_initialized
+    try:
+        if os.path.exists(RETRIEVER_STATE_FILE):
+            with open(RETRIEVER_STATE_FILE, 'rb') as f:
+                state = pickle.load(f)
+            db_initialized = state.get('db_initialized', False)
+            print(f"📁 Loaded retriever state: db_initialized={db_initialized}")
+            return True
+    except Exception as e:
+        print(f"⚠️ Failed to load retriever state: {e}")
+        db_initialized = False
+    return False
 
 def load_documents_from_postgres(db: Session = None, tenant_id: str = None):
     """
@@ -300,6 +340,7 @@ def load_documents(include_postgres=True, tenant_id=None):
 def load_vectorstore():
     if os.path.exists(os.path.join(VECSTORE_PATH, "index.faiss")):
         print("📂 Loading FAISS vector store from disk...")
+        embeddings = get_embeddings()  # Add this line
         return FAISS.load_local(VECSTORE_PATH, embeddings, allow_dangerous_deserialization=True)
     else:
         print("🚫 FAISS index not found, constructing a new one...")
@@ -338,6 +379,7 @@ def construct_retrievers(include_postgres=True, tenant_id=None):
 
         # Step 2: Create FAISS vector store
         print("Creating FAISS vector store...")
+        embeddings = get_embeddings()  # Add this line
         faiss_db = FAISS.from_documents(all_documents, embeddings)
         print("FAISS vector store created successfully.")
 
@@ -465,18 +507,107 @@ def unload_documents_and_embeddings(clear_faiss=False):
 
 def get_retrievers():
     """Get the constructed retrievers. Constructs them if not already done."""
-    if not db_initialized:
-        construct_retrievers()
+    global faiss_db, hybrid_retriever, db_initialized
     
-
+    # Load state from disk first
+    load_retriever_state()
+    
+    # Check if FAISS index exists on disk
+    faiss_exists = os.path.exists(os.path.join(VECSTORE_PATH, "index.faiss"))
+    
+    if not db_initialized or faiss_db is None or hybrid_retriever is None:
+        if faiss_exists:
+            print("📁 Loading existing FAISS index from disk...")
+            try:
+                # Load FAISS from disk
+                faiss_db = load_vectorstore()
+                if faiss_db is not None:
+                    print("✅ FAISS vector store loaded from disk")
+                    
+                    # Create retrievers from loaded FAISS
+                    faiss_retriever = faiss_db.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+                    
+                    # For BM25, we need to check if we have documents
+                    global bm25_retriever
+                    if bm25_retriever is None:
+                        # Load documents for BM25 (lighter operation)
+                        load_documents_for_bm25()
+                    
+                    if bm25_retriever is not None:
+                        hybrid_retriever = EnsembleRetriever(
+                            retrievers=[faiss_retriever, bm25_retriever],
+                            weights=[config["faissWeight"], config["bm25Weight"]]
+                        )
+                        print("✅ Hybrid retriever created from existing components")
+                    else:
+                        print("⚠️ BM25 not available, using FAISS only")
+                        hybrid_retriever = faiss_retriever
+                    
+                    db_initialized = True
+                    save_retriever_state()
+                    return faiss_db, hybrid_retriever
+            except Exception as e:
+                print(f"❌ Failed to load existing FAISS: {e}")
+        
+        # If loading failed or nothing exists, construct from scratch
+        print("🔧 Constructing retrievers from scratch...")
+        faiss_db, hybrid_retriever = construct_retrievers()
+        if faiss_db is not None:
+            db_initialized = True
+            save_retriever_state()
+    
     return faiss_db, hybrid_retriever
 
+def load_documents_for_bm25():
+    """Load documents specifically for BM25 retriever creation"""
+    global bm25_retriever, all_documents
+    
+    try:
+        # Load from cache first
+        if load_documents_cache():
+            print(f"📁 Loaded {len(all_documents)} documents from cache for BM25")
+        else:
+            # Load fresh documents
+            load_documents(include_postgres=True)
+        
+        if all_documents:
+            print("🔧 Creating BM25 retriever...")
+            bm25_retriever = BM25Retriever.from_documents(all_documents)
+            bm25_retriever.k = 5
+            print("✅ BM25 retriever created successfully")
+        else:
+            print("⚠️ No documents available for BM25")
+            bm25_retriever = None
+            
+    except Exception as e:
+        print(f"❌ Failed to create BM25 retriever: {e}")
+        bm25_retriever = None
 
-def clear_cache():
-    """Clear the documents cache file"""
-  
-    if os.path.exists(cache_file):
-        os.remove(cache_file)
-        print("Cache cleared")
-    else:
-        print("No cache file to clear")
+def update_faiss_and_hybrid_retriever(faiss_db):
+    """
+    Update the hybrid retriever with a new FAISS store while keeping existing BM25.
+    This is efficient because we don't recreate BM25.
+    """
+    global hybrid_retriever, faiss_retriever
+    
+    try:
+        # Create new FAISS retriever from updated FAISS store
+        faiss_retriever = faiss_db.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+        print("✅ FAISS retriever updated")
+        
+        # Create new hybrid retriever with updated FAISS + existing BM25
+        if bm25_retriever is not None:
+            hybrid_retriever = EnsembleRetriever(
+                retrievers=[faiss_retriever, bm25_retriever],
+                weights=[config["faissWeight"], config["bm25Weight"]]
+            )
+            print("✅ Hybrid retriever updated (new FAISS + existing BM25)")
+        else:
+            print("⚠️ BM25 not available, using FAISS only")
+            hybrid_retriever = faiss_retriever
+        
+        return faiss_retriever, hybrid_retriever
+        
+    except Exception as e:
+        print(f"❌ Error updating retrievers: {e}")
+        return None, None

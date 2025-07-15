@@ -66,17 +66,19 @@ def worker_ready_handler(sender=None, **kwargs):
     except Exception as e:
         print(f"❌ Database setup error: {e}")
     
-    # Step 2: Force CPU usage for embeddings in worker process
-    print("🔧 Configuring CPU-only mode for ML models...")
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Hide GPU from worker
-    
-    # Also set torch to CPU mode
+    # Step 2: Check GPU availability
+    print("🔧 Checking GPU availability...")
     try:
         import torch
-        torch.cuda.is_available = lambda: False
-        print("✅ PyTorch configured for CPU-only mode")
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"✅ GPU available: {gpu_name} (Count: {gpu_count})")
+            print(f"✅ CUDA Version: {torch.version.cuda}")
+        else:
+            print("⚠️ No GPU available, using CPU")
     except ImportError:
-        print("⚠️ PyTorch not available, skipping GPU configuration")
+        print("⚠️ PyTorch not available")
     
     # Step 3: Initialize RAG retrievers
     print("🔧 Initializing RAG retrievers...")
@@ -93,7 +95,8 @@ def worker_ready_handler(sender=None, **kwargs):
             print("✅ Loaded existing retrievers from cache")
         
         if faiss_db is not None:
-            print("✅ Retrievers initialized in Celery worker (CPU mode)")
+            device_type = "GPU" if torch.cuda.is_available() else "CPU"
+            print(f"✅ Retrievers initialized in Celery worker ({device_type} mode)")
             print(f"✅ FAISS DB available: {faiss_db is not None}")
             print(f"✅ Hybrid retriever available: {hybrid_retriever is not None}")
         else:
@@ -110,7 +113,8 @@ def worker_ready_handler(sender=None, **kwargs):
         from backend.response_generation.reranker import load_reranker_model
         
         load_reranker_model()
-        print("✅ Reranker model initialized in Celery worker")
+        device_type = "GPU" if torch.cuda.is_available() else "CPU"
+        print(f"✅ Reranker model initialized in Celery worker ({device_type} mode)")
         
     except Exception as reranker_error:
         print(f"❌ Reranker model initialization failed: {reranker_error}")

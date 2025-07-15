@@ -20,11 +20,11 @@ def load_reranker_model():
     reranker_model = AutoModelForSequenceClassification.from_pretrained(reranker_model_id).to(device)
     reranker_loaded = True
     print(f"Reranker model loaded: {reranker_model_id}")
-    torch.cuda.empty_cache()
+    
 
 
 def rerank_docs(query, docs, top_k=5):
-    torch.cuda.empty_cache()
+    
 
     # BGE-Reranker expects [query] </s> document format
     pairs = [f"{query} </s> {doc.page_content}" for doc in docs]
@@ -44,7 +44,8 @@ def rerank_docs(query, docs, top_k=5):
     doc_scores.sort(key=lambda x: x[1], reverse=True)
 
     reranked_docs = [doc for doc, score in doc_scores[:top_k]]
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return reranked_docs
 

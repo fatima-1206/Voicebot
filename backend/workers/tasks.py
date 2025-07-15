@@ -7,6 +7,7 @@ from backend.db.connection import SessionLocal
 # from backend.db.models import Query as DB_Query
 from uuid import UUID
 from datetime import datetime
+import torch
 # Add this new task after your existing process_uploaded_document task
 # Replace the update_document_visibility task with this corrected version:
 
@@ -305,19 +306,56 @@ def scrape_link(link_id: str, url: str, depth: int, excluded_sublinks: str, tena
 
 # Add this task to your existing tasks.py file
 
-@celery_app.task(name='process_query')
-def process_query_task(query_id: str, query: str, tenant_id: str, user_id: str, 
+@celery_app.task(name='process_query', bind=True)
+def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id: str, 
                       max_tokens: int = 500, temperature: float = 0.7, session_id: str = None):
     """Process a user query using RAG pipeline asynchronously"""
     print(f"🔄 Processing query {query_id}: {query[:50]}...")
+    print(f"🔧 Task running in worker: {self.request.hostname}")
     
     try:
+        # Import here to avoid import issues in workers
+        from backend.response_generation.generator import generate_response
+        from backend.db.connection import SessionLocal
+        from backend.db.models import QueryLog as DB_QueryLog
+        from uuid import UUID
+        from datetime import datetime
+        
+        # Ensure everything is initialized
+        print(f"🔧 Ensuring RAG components are initialized...")
+        try:
+            from backend.response_generation.generator import initialize_rag_chain, initialize_model
+            
+            # Force initialization if needed
+            initialize_model()
+            initialize_rag_chain()
+            print(f"✅ RAG components verified/initialized")
+            
+        except Exception as init_error:
+            print(f"❌ Failed to initialize RAG components: {init_error}")
+            import traceback
+            traceback.print_exc()
+            # Don't fail here, let generate_response handle it
+        
         # Generate the response using RAG
         print(f"🤖 Generating response for query: {query}")
-        response = generate_response(query)
+        
+        # Add timeout and better error handling
+        try:
+            response = generate_response(query)
+        except Exception as gen_error:
+            print(f"❌ Error in generate_response: {gen_error}")
+            import traceback
+            traceback.print_exc()
+            response = f"I apologize, but I encountered an error while processing your query: {str(gen_error)}"
         
         if response is None:
-            raise ValueError("generate_response returned None")
+            print("⚠️ generate_response returned None")
+            response = "I apologize, but I was unable to generate a response to your query. Please try again."
+        
+        if not response.strip():
+            print("⚠️ generate_response returned empty string")
+            response = "I apologize, but I couldn't generate a meaningful response to your query. Please try rephrasing your question."
         
         print(f"✅ Generated response: {response[:100]}...")
         
@@ -325,18 +363,14 @@ def process_query_task(query_id: str, query: str, tenant_id: str, user_id: str,
         try:
             db = SessionLocal()
             
-            # Import the correct model - QueryLog instead of Query
-            from backend.db.models import QueryLog as DB_QueryLog  # Changed this line
-            
             # Create query log record using the correct table structure
-            query_log_record = DB_QueryLog(  # Changed this
+            query_log_record = DB_QueryLog(
                 id=UUID(query_id),
                 user_id=UUID(user_id),
                 session_id=UUID(session_id) if session_id and session_id != 'string' else None,
-                query=query,  # Changed from query_text to query
-                response=response,  # Changed from response_text to response
-                timestamp=datetime.utcnow()  # Using timestamp instead of created_at
-                # Note: latency could be calculated if needed
+                query=query,
+                response=response,
+                timestamp=datetime.utcnow()
             )
             db.add(query_log_record)
             db.commit()
@@ -344,6 +378,8 @@ def process_query_task(query_id: str, query: str, tenant_id: str, user_id: str,
             
         except Exception as db_error:
             print(f"⚠️ Warning: Failed to save to database: {db_error}")
+            import traceback
+            traceback.print_exc()
             # Continue even if database save fails
         finally:
             if 'db' in locals():
@@ -356,11 +392,14 @@ def process_query_task(query_id: str, query: str, tenant_id: str, user_id: str,
             "response": response,
             "tenant_id": tenant_id,
             "user_id": user_id,
-            "session_id": session_id
+            "session_id": session_id,
+            "worker": self.request.hostname
         }
         
         print(f"✅ Query processing completed successfully")
         print(f"📝 Response: {response[:100]}...")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return result
         
     except Exception as e:
@@ -372,7 +411,8 @@ def process_query_task(query_id: str, query: str, tenant_id: str, user_id: str,
             "status": "error",
             "query_id": query_id,
             "query": query,
-            "error": str(e)
+            "error": str(e),
+            "worker": self.request.hostname
         }
 
 @celery_app.task(name='speech_to_text')

@@ -111,6 +111,8 @@ def call_llm(question: str, context: str) -> str:
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.eos_token_id
     )
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return tokenizer.decode(outputs[0], skip_special_tokens=True).replace(prompt, "").strip()
 
 class LambdaLLM(LLM):

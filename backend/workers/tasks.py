@@ -320,17 +320,34 @@ def _ensure_rag_initialized():
         print(f"❌ Failed to initialize RAG components: {e}")
         raise
 
-# Keep original tasks for backward compatibility but mark as deprecated
-@celery_app.task(name='process_uploaded_document', bind=True)
-def process_uploaded_document(self, file_bytes, filename, doc_id, tenant_id, user_id, is_public):
-    """Process a single uploaded document"""
-    print(f"🔄 Processing single document: {filename}")
+
+
+@celery_app.task(name='process_uploaded_document')
+def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public):
+    """Process uploaded document - extract text, create chunks, etc."""
+    print(f"🔄 Task started for document: {filename} (doc_id: {doc_id})")
     
-    with manage_gpu_memory():
+    try:
+        from backend.db.connection import SessionLocal
+        from backend.rag.add_document import process_uploaded_document as process_doc
+        from sqlalchemy import text
+        
+        print(f"📊 Processing document with {len(file_bytes)} bytes")
+        
+        # Create database session with error handling
+        db = SessionLocal()
+        
         try:
-            from backend.rag.add_document import process_uploaded_document as process_doc
+            # Test database connection before proceeding (fixed SQL)
+            db.execute(text("SELECT 1")).fetchone()
+            print("✅ Database connection verified in task")
             
-            # Process the document
+            # Convert file_bytes back to bytes if it was encoded as string
+            if isinstance(file_bytes, str):
+                file_bytes = file_bytes.encode("latin1")
+                print(f"🔧 Converted string to bytes: {len(file_bytes)} bytes")
+            
+            # Process the document (INCLUDE db parameter!)
             result = process_doc(
                 file_bytes=file_bytes,
                 filename=filename,
@@ -338,24 +355,24 @@ def process_uploaded_document(self, file_bytes, filename, doc_id, tenant_id, use
                 tenant_id=tenant_id,
                 user_id=user_id,
                 is_public=is_public
+                # db=db  # Don't forget this!
             )
+            print(f"✅ Document processing completed: {result}")
+            return result
             
-            # Rebuild retrievers
-            _rebuild_retrievers_once()
+        except Exception as db_error:
+            print(f"❌ Database error in task: {db_error}")
+            db.rollback()
+            raise db_error
+        finally:
+            db.close()
             
-            return {
-                "status": "success",
-                "doc_id": doc_id,
-                "result": result
-            }
-            
-        except Exception as e:
-            print(f"❌ Error processing document {filename}: {e}")
-            return {
-                "status": "error",
-                "doc_id": doc_id,
-                "error": str(e)
-            }
+    except Exception as e:
+        print(f"❌ Error processing document: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "error": str(e)}
+    
 
 @celery_app.task(name='update_document_visibility')
 def update_document_visibility(doc_id: str, is_public: bool, tenant_id: str):

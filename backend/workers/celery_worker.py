@@ -121,6 +121,19 @@ def worker_ready_handler(sender=None, **kwargs):
         import traceback
         traceback.print_exc()
     
+    # Step 5: Initialize Response Generation
+    print("🔧 Initializing response generation...")
+    try:
+        from backend.response_generation.generator import initialize_for_celery
+        
+        initialize_for_celery()
+        print("✅ Response generation initialized in Celery worker")
+        
+    except Exception as response_error:
+        print(f"❌ Response generation initialization failed: {response_error}")
+        import traceback
+        traceback.print_exc()
+    
     print("🎉 Celery worker initialization complete!")
     print("=" * 50)
 

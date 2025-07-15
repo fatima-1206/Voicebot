@@ -2,6 +2,11 @@
 # celery -A backend.workers.celery_worker.celery_app worker --loglevel=info --concurrency=1 --hostname=voicebot@%h
 from backend.workers.celery_worker import celery_app
 import json
+from backend.response_generation.generator import generate_response
+from backend.db.connection import SessionLocal
+# from backend.db.models import Query as DB_Query
+from uuid import UUID
+from datetime import datetime
 # Add this new task after your existing process_uploaded_document task
 # Replace the update_document_visibility task with this corrected version:
 
@@ -307,41 +312,35 @@ def process_query_task(query_id: str, query: str, tenant_id: str, user_id: str,
     print(f"🔄 Processing query {query_id}: {query[:50]}...")
     
     try:
-        # Import here to avoid circular imports
-        from backend.response_generation.generator import generate_response
-        
         # Generate the response using RAG
         print(f"🤖 Generating response for query: {query}")
         response = generate_response(query)
         
-        # Save query and response to database if needed
+        if response is None:
+            raise ValueError("generate_response returned None")
+        
+        print(f"✅ Generated response: {response[:100]}...")
+        
+        # Save query and response to database using query_logs table
         try:
-            from backend.db.connection import SessionLocal
-            from backend.db.models import Query as DB_Query
-            from uuid import UUID
-            from datetime import datetime
-            
             db = SessionLocal()
             
-            # Create query record - check if Query model exists first
-            try:
-                query_record = DB_Query(
-                    id=UUID(query_id),
-                    tenant_id=UUID(tenant_id),
-                    user_id=UUID(user_id),
-                    query_text=query,
-                    response_text=response,
-                    session_id=session_id,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    created_at=datetime.utcnow()
-                )
-                db.add(query_record)
-                db.commit()
-                print(f"💾 Query and response saved to database")
-            except Exception as model_error:
-                print(f"⚠️ Query model may not exist in database: {model_error}")
-                # Continue without saving to database
+            # Import the correct model - QueryLog instead of Query
+            from backend.db.models import QueryLog as DB_QueryLog  # Changed this line
+            
+            # Create query log record using the correct table structure
+            query_log_record = DB_QueryLog(  # Changed this
+                id=UUID(query_id),
+                user_id=UUID(user_id),
+                session_id=UUID(session_id) if session_id and session_id != 'string' else None,
+                query=query,  # Changed from query_text to query
+                response=response,  # Changed from response_text to response
+                timestamp=datetime.utcnow()  # Using timestamp instead of created_at
+                # Note: latency could be calculated if needed
+            )
+            db.add(query_log_record)
+            db.commit()
+            print(f"💾 Query and response saved to query_logs table")
             
         except Exception as db_error:
             print(f"⚠️ Warning: Failed to save to database: {db_error}")

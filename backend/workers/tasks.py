@@ -56,7 +56,7 @@ def manage_gpu_memory():
 # SPEECH-TO-TEXT TASKS---------------------------------------------------------
 # Replace the existing transcribe_chunk function with this:
 
-@celery_app.task(bind=True)
+@celery_app.task(name='transcribe_chunk', bind=True)
 def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tenant_id: str = None):
     """
     Transcribe audio chunk using direct numpy array processing (no temp files)
@@ -67,7 +67,8 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
         chunk_id: Unique identifier for this transcription chunk
         tenant_id: Tenant ID for WebSocket routing (optional for backwards compatibility)
     """
-    print(f"🔄 Transcribing audio chunk {chunk_id} for user {user_id}")
+    print(f"🔄 [TASK START] Transcribing audio chunk {chunk_id} for user {user_id} (tenant: {tenant_id})")
+    print(f"   Audio bytes length: {len(audio_bytes)}")
     
     try:
         import numpy as np
@@ -77,23 +78,31 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
         import asyncio
         from datetime import datetime
         
+        print(f"   📦 Imports successful")
+        
         # Clear GPU cache at start
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            print(f"   🚀 GPU cache cleared")
         
         # Convert bytes to numpy array
+        print(f"   🔄 Converting bytes to numpy array...")
         audio_data = bytes_to_numpy_audio(audio_bytes)
         
         if audio_data is None or len(audio_data) == 0:
             raise ValueError("Could not convert audio bytes to numpy array")
         
+        print(f"   ✅ Audio data converted: {len(audio_data)} samples")
+        
         # Convert to tensor and clamp values
         audio_tensor = torch.from_numpy(audio_data).float()
         audio_tensor = torch.clamp(audio_tensor, -1.0, 1.0)
         
+        print(f"   ✅ Audio tensor created: {audio_tensor.shape}")
+        
         # Apply VAD if available (optional enhancement)
         try:
-    
+            print(f"   🔄 Applying VAD...")
             # Get speech timestamps
             speech_timestamps = get_speech_timestamps(audio_tensor, vad_model, sampling_rate=sample_rate)
             
@@ -101,26 +110,28 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
                 # Extract only speech portions
                 speech_audio = collect_chunks(speech_timestamps, audio_tensor)
                 audio_data = speech_audio.numpy().astype(np.float32)
-                print(f"✅ VAD applied: {len(speech_timestamps)} speech segments found")
+                print(f"   ✅ VAD applied: {len(speech_timestamps)} speech segments found")
             else:
-                print("⚠️ No speech detected in audio chunk")
+                print("   ⚠️ No speech detected in audio chunk")
                 # Still process the audio even if VAD doesn't detect speech
                 audio_data = audio_tensor.numpy().astype(np.float32)
                 
         except ImportError:
-            print("⚠️ VAD not available, processing full audio chunk")
+            print("   ⚠️ VAD not available, processing full audio chunk")
             audio_data = audio_tensor.numpy().astype(np.float32)
         except Exception as vad_error:
-            print(f"⚠️ VAD error: {vad_error}, processing full audio chunk")
+            print(f"   ⚠️ VAD error: {vad_error}, processing full audio chunk")
             audio_data = audio_tensor.numpy().astype(np.float32)
         
         # Transcribe using Whisper model directly on numpy array
-        print(f"📝 Transcribing at {datetime.now().strftime('%H:%M:%S')}")
+        print(f"   📝 Starting transcription at {datetime.now().strftime('%H:%M:%S')}")
         start_time = time.time()
         
         # Use different settings based on device
         device = "cuda" if torch.cuda.is_available() else "cpu"
         language = "en"  # You can make this configurable
+        
+        print(f"   🎯 Using device: {device}")
         
         if device == 'cpu':
             segments, info = model.transcribe(audio_data, beam_size=1, language=language, task="transcribe")
@@ -129,6 +140,8 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
         
         end_time = time.time()
         transcription_duration = end_time - start_time
+        
+        print(f"   ✅ Whisper transcription completed in {transcription_duration:.2f}s")
         
         # Collect all transcript segments
         transcript_parts = []
@@ -149,7 +162,8 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
         confidence = getattr(info, 'language_probability', 0.0)
         detected_language = getattr(info, 'language', 'unknown')
         
-        print(f"✅ Transcription completed in {transcription_duration:.2f}s: {full_transcript[:50]}...")
+        print(f"   ✅ Transcription completed: '{full_transcript[:50]}...'")
+        print(f"   📊 Confidence: {confidence}, Language: {detected_language}")
         
         # Clear GPU cache after processing
         if torch.cuda.is_available():
@@ -157,6 +171,7 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
         
         # Send results back via WebSocket if tenant_id is provided
         if tenant_id:
+            print(f"   📡 Sending results via WebSocket...")
             send_transcription_result_via_websocket(
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -167,7 +182,11 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
                 segments=segment_details,
                 processing_time=transcription_duration
             )
+        else:
+            print(f"   ⚠️ No tenant_id provided, skipping WebSocket notification")
 
+        print(f"🎉 [TASK SUCCESS] Chunk {chunk_id} processed successfully")
+        
         return {
             "status": "success",
             "user_id": user_id,
@@ -182,7 +201,7 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
         }
         
     except Exception as e:
-        print(f"❌ Error transcribing audio chunk {chunk_id}: {e}")
+        print(f"❌ [TASK ERROR] Error transcribing audio chunk {chunk_id}: {e}")
         import traceback
         traceback.print_exc()
         
@@ -198,7 +217,7 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
                 chunk_id=chunk_id,
                 error=str(e)
             )
-
+        
         return {
             "status": "error",
             "user_id": user_id,

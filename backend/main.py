@@ -45,13 +45,6 @@ def get_db():
 def root():
     return {"message": "Voicebot API is running!"}
 
-@app.on_event("startup")
-def init_db():
-    if not db_has_tables():
-        schema_path = os.path.join(os.path.dirname(__file__), "db", "schema.sql")
-        run_sql_file(schema_path)
-        print("✅ Database initialized")
-
 redis_client = redis.Redis(host='localhost', port=6379, db=2, decode_responses=True)
 
 # Add this Redis listener function
@@ -92,10 +85,14 @@ async def redis_listener():
     finally:
         pubsub.close()
 
-# Start Redis listener when the app starts (add this to the startup event)
+# Combined startup event handler
 @app.on_event("startup")
 async def startup_event():
-    init_db()
+    # Initialize database
+    if not db_has_tables():
+        schema_path = os.path.join(os.path.dirname(__file__), "db", "schema.sql")
+        run_sql_file(schema_path)
+        print("✅ Database initialized")
     
     # Start Redis listener in background
     asyncio.create_task(redis_listener())

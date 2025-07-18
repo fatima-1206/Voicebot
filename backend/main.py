@@ -135,7 +135,7 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                     try:
                         audio_bytes = base64.b64decode(audio_chunk_base64)
                         user_audio_buffers[key] += audio_bytes
-                        user_last_activity[key] = time.time()  # Update activity timestamp
+                        user_last_activity[key] = time.time()
 
                         # Rolling buffer configuration
                         buffer_size = data.get("buffer_size", 32000)  # 32KB chunks
@@ -145,12 +145,12 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                             # Process current buffer
                             transcription_id = str(uuid4())
                             
-                            # Note: You'll need to modify transcribe_chunk to handle WebSocket responses
-                            # For now, this will process but won't send results back
+                            # Pass tenant_id so results can be sent back via WebSocket
                             transcribe_chunk.delay(
                                 audio_bytes=bytes(user_audio_buffers[key]),
                                 user_id=user_id,
-                                chunk_id=transcription_id
+                                chunk_id=transcription_id,
+                                tenant_id=tenant_id  # Add this parameter
                             )
 
                             # Rolling buffer: keep overlap_size bytes for next chunk
@@ -178,7 +178,8 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                         transcribe_chunk.delay(
                             audio_bytes=bytes(user_audio_buffers[key]),
                             user_id=user_id,
-                            chunk_id=transcription_id
+                            chunk_id=transcription_id,
+                            tenant_id=tenant_id  # Add this parameter
                         )
 
                         # Clean up buffer completely at end
@@ -196,6 +197,8 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                             "type": "error",
                             "message": f"Error processing final audio chunk: {str(e)}"
                         })
+
+                        
     except WebSocketDisconnect:
         # Clean up user buffers on disconnect
         key = f"{tenant_id}_{user_id}"

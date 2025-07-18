@@ -11,7 +11,13 @@ from backend.tts.routes import router as tts_router  # Add this
 from backend.ws_manager import ConnectionManager
 from fastapi import WebSocket, WebSocketDisconnect
 import json
-
+import base64
+import tempfile
+from backend.workers.tasks import transcribe_chunk
+from uuid import uuid4
+from collections import defaultdict
+import time
+# In-memory buffers
 app = FastAPI()
 app.include_router(auth_router, prefix="/auth")
 app.include_router(documents_router, prefix="/documents")
@@ -19,6 +25,10 @@ app.include_router(query_router, prefix="/query")
 app.include_router(tts_router, prefix="/tts")  # Add this
 
 manager = ConnectionManager()
+
+
+user_audio_buffers = defaultdict(bytearray)
+user_last_activity = defaultdict(float)  # Track last activity for cleanup
 
 # Dependency to get DB session
 def get_db():
@@ -117,9 +127,80 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                         "type": "error",
                         "message": "Empty query received"
                     })
+            elif data.get("type") == "audio_stream":
+                audio_chunk_base64 = data.get("audio", None)
+                if audio_chunk_base64:
+                    key = f"{tenant_id}_{user_id}"
                     
+                    try:
+                        audio_bytes = base64.b64decode(audio_chunk_base64)
+                        user_audio_buffers[key] += audio_bytes
+                        user_last_activity[key] = time.time()  # Update activity timestamp
+
+                        # Rolling buffer configuration
+                        buffer_size = data.get("buffer_size", 32000)  # 32KB chunks
+                        overlap_size = data.get("overlap_size", 8000)  # 8KB overlap
+                        
+                        if len(user_audio_buffers[key]) >= buffer_size:
+                            # Process current buffer
+                            transcription_id = str(uuid4())
+                            
+                            # Note: You'll need to modify transcribe_chunk to handle WebSocket responses
+                            # For now, this will process but won't send results back
+                            transcribe_chunk.delay(
+                                audio_bytes=bytes(user_audio_buffers[key]),
+                                user_id=user_id,
+                                chunk_id=transcription_id
+                            )
+
+                            # Rolling buffer: keep overlap_size bytes for next chunk
+                            user_audio_buffers[key] = user_audio_buffers[key][-overlap_size:]
+
+                            await websocket.send_json({
+                                "type": "transcription_submitted",
+                                "transcription_id": transcription_id,
+                                "buffer_size": len(user_audio_buffers[key]),
+                                "overlap_size": overlap_size
+                            })
+                            
+                    except Exception as e:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": f"Error processing audio chunk: {str(e)}"
+                        })
+
+            elif data.get("type") == "audio_stream_end":
+                # Handle end of audio stream - process remaining buffer
+                key = f"{tenant_id}_{user_id}"
+                if key in user_audio_buffers and len(user_audio_buffers[key]) > 0:
+                    try:
+                        transcription_id = str(uuid4())
+                        transcribe_chunk.delay(
+                            audio_bytes=bytes(user_audio_buffers[key]),
+                            user_id=user_id,
+                            chunk_id=transcription_id
+                        )
+
+                        # Clean up buffer completely at end
+                        user_audio_buffers[key] = bytearray()
+                        if key in user_last_activity:
+                            del user_last_activity[key]
+
+                        await websocket.send_json({
+                            "type": "transcription_submitted",
+                            "transcription_id": transcription_id,
+                            "final": True
+                        })
+                    except Exception as e:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": f"Error processing final audio chunk: {str(e)}"
+                        })
     except WebSocketDisconnect:
-        manager.disconnect(tenant_id, user_id)
-    except Exception as e:
-        print(f"WebSocket error: {e}")
+        # Clean up user buffers on disconnect
+        key = f"{tenant_id}_{user_id}"
+        if key in user_audio_buffers:
+            del user_audio_buffers[key]
+        if key in user_last_activity:
+            del user_last_activity[key]
         manager.disconnect(tenant_id, user_id)

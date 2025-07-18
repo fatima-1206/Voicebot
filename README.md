@@ -13,12 +13,12 @@ for dev mode:
 ```
 
 it will run on
-```
+```bash
 http://127.0.0.1:8000/
 ```
 
 you can view the api with swagger ui on 
-```
+```bash
 http://127.0.0.1:8000/docs
 ```
 
@@ -30,7 +30,7 @@ python3 -m venv venv && source venv/bin/activate && pip install -r requirements.
 
 to setup the environment on Windows run:
 
-```cmd 
+```bash
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt

@@ -17,6 +17,10 @@ from backend.workers.tasks import transcribe_chunk
 from uuid import uuid4
 from collections import defaultdict
 import time
+import redis
+import asyncio
+import threading
+
 # In-memory buffers
 app = FastAPI()
 app.include_router(auth_router, prefix="/auth")
@@ -25,7 +29,6 @@ app.include_router(query_router, prefix="/query")
 app.include_router(tts_router, prefix="/tts")  # Add this
 
 manager = ConnectionManager()
-
 
 user_audio_buffers = defaultdict(bytearray)
 user_last_activity = defaultdict(float)  # Track last activity for cleanup
@@ -42,12 +45,58 @@ def get_db():
 def root():
     return {"message": "Voicebot API is running!"}
 
+redis_client = redis.Redis(host='localhost', port=6379, db=2, decode_responses=True)
+
+# Add this Redis listener function
+async def redis_listener():
+    """Listen for Redis messages and forward to WebSocket clients"""
+    pubsub = redis_client.pubsub()
+    
+    # Subscribe to all WebSocket channels
+    pubsub.psubscribe("ws:*")
+    
+    print("🔄 Redis WebSocket listener started")
+    
+    try:
+        while True:
+            message = pubsub.get_message(timeout=1.0)
+            if message and message['type'] == 'pmessage':
+                try:
+                    # Parse channel to extract tenant_id and user_id
+                    channel = message['channel']
+                    parts = channel.split(':')
+                    if len(parts) >= 3:
+                        tenant_id = parts[1]
+                        user_id = parts[2]
+                        
+                        # Parse message data
+                        data = json.loads(message['data'])
+                        
+                        # Forward to WebSocket client
+                        await manager.send_json_to_user(tenant_id, user_id, data)
+                        
+                except Exception as e:
+                    print(f"❌ Error processing Redis message: {e}")
+            
+            await asyncio.sleep(0.01)  # Small delay to prevent busy waiting
+            
+    except Exception as e:
+        print(f"❌ Redis listener error: {e}")
+    finally:
+        pubsub.close()
+
+# Combined startup event handler
 @app.on_event("startup")
-def init_db():
+async def startup_event():
+    # Initialize database
     if not db_has_tables():
         schema_path = os.path.join(os.path.dirname(__file__), "db", "schema.sql")
         run_sql_file(schema_path)
         print("✅ Database initialized")
+    
+    # Start Redis listener in background
+    asyncio.create_task(redis_listener())
+    print("🚀 Redis WebSocket listener started")
 
 @app.websocket("/ws/{tenant_id}/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str):
@@ -128,6 +177,7 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                         "message": "Empty query received"
                     })
             elif data.get("type") == "audio_stream":
+                from uuid import uuid4  # Add this import
                 audio_chunk_base64 = data.get("audio", None)
                 if audio_chunk_base64:
                     key = f"{tenant_id}_{user_id}"
@@ -170,6 +220,7 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                         })
 
             elif data.get("type") == "audio_stream_end":
+                from uuid import uuid4  # Add this import
                 # Handle end of audio stream - process remaining buffer
                 key = f"{tenant_id}_{user_id}"
                 if key in user_audio_buffers and len(user_audio_buffers[key]) > 0:

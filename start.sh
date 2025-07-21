@@ -177,9 +177,20 @@ sleep 3
 # Start FastAPI server
 echo -e "${YELLOW}🌐 Starting FastAPI server...${NC}"
 if [ "$DEV_MODE" = true ]; then
-    python -m uvicorn backend.main:app --reload --host $FASTAPI_HOST --port $FASTAPI_PORT &
+    python -m uvicorn backend.main:app \
+        --reload \
+        --host $FASTAPI_HOST \
+        --port $FASTAPI_PORT \
+        --ws-ping-interval 30 \
+        --ws-ping-timeout 30 \
+        --timeout-keep-alive 300 &
 else
-    python -m uvicorn backend.main:app --host $FASTAPI_HOST --port $FASTAPI_PORT &
+    python -m uvicorn backend.main:app \
+        --host $FASTAPI_HOST \
+        --port $FASTAPI_PORT \
+        --ws-ping-interval 30 \
+        --ws-ping-timeout 30 \
+        --timeout-keep-alive 300 &
 fi
 FASTAPI_PID=$!
 

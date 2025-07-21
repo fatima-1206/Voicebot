@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Real-Time Voice Conversation</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .connected { background-color: #d4edda; }
+        .error { background-color: #f8d7da; }
+        .transcription { background-color: #e2f3ff; margin: 5px 0; padding: 10px; border-radius: 5px; }
+        .response { background-color: #f0f8e7; margin: 5px 0; padding: 10px; border-radius: 5px; }
+        button { padding: 10px 20px; margin: 5px; font-size: 16px; }
+        .recording { background-color: #ff4444; color: white; }
+        .audio-controls { display: flex; gap: 10px; align-items: center; }
+    </style>
+</head>
+<body>
+    <h1>🤖 Real-Time Voice Conversation</h1>
+    
+    <div id="status" class="status">Connecting...</div>
+    
+    <div class="audio-controls">
+        <button id="startBtn">🎤 Start Conversation</button>
+        <button id="stopBtn" disabled>⏹️ Stop</button>
+        <label>
+            <input type="checkbox" id="conversationMode" checked> 
+            Real-time conversation mode
+        </label>
+        <select id="languageSelect">
+            <option value="en">English</option>
+            <option value="ur">Urdu</option>
+        </select>
+    </div>
+    
+    <div id="conversation"></div>
+    
+    <script>
+        // Configuration - UPDATE THESE VALUES
+        const WS_URL = 'ws://localhost:8000/ws';
+        const TENANT_ID = 'your_tenant_id';  // Replace with actual tenant ID
+        const USER_ID = 'your_user_id';      // Replace with actual user ID
+        const TOKEN = 'your_jwt_token';      // Replace with actual JWT token
+        
+        let websocket = null;
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isRecording = false;
+        
+        const statusDiv = document.getElementById('status');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const conversationDiv = document.getElementById('conversation');
+        const conversationModeCheckbox = document.getElementById('conversationMode');
+        const languageSelect = document.getElementById('languageSelect');
+        
+        // Connect to WebSocket
+        function connectWebSocket() {
+            const wsUrl = `${WS_URL}/${TENANT_ID}/${USER_ID}?token=${TOKEN}`;
+            websocket = new WebSocket(wsUrl);
+            
+            websocket.onopen = () => {
+                statusDiv.textContent = '✅ Connected - Ready for conversation';
+                statusDiv.className = 'status connected';
+                startBtn.disabled = false;
+            };
+            
+            websocket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleWebSocketMessage(data);
+            };
+            
+            websocket.onclose = () => {
+                statusDiv.textContent = '❌ Disconnected';
+                statusDiv.className = 'status error';
+                startBtn.disabled = true;
+                stopBtn.disabled = true;
+            };
+            
+            websocket.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                statusDiv.textContent = '❌ Connection error';
+                statusDiv.className = 'status error';
+            };
+        }
+        
+        function handleWebSocketMessage(data) {
+            console.log('WebSocket message:', data);
+            
+            switch(data.type) {
+                case 'transcription_result':
+                    addTranscription(data.transcript);
+                    break;
+                    
+                case 'conversation_update':
+                    if (data.update_type === 'response_generated') {
+                        addResponse(data.response);
+                    }
+                    break;
+                    
+                case 'text_response':
+                    addResponse(data.response);
+                    break;
+                    
+                case 'audio_chunk':
+                    // Play audio chunk for TTS response
+                    playAudioChunk(data.chunk);
+                    break;
+                    
+                case 'audio_ready':
+                    console.log('Audio ready:', data.filename);
+                    break;
+                    
+                case 'error':
+                    addError(data.error || data.message);
+                    break;
+            }
+        }
+        
+        function addTranscription(transcript) {
+            const div = document.createElement('div');
+            div.className = 'transcription';
+            div.innerHTML = `<strong>You:</strong> ${transcript}`;
+            conversationDiv.appendChild(div);
+            conversationDiv.scrollTop = conversationDiv.scrollHeight;
+        }
+        
+        function addResponse(response) {
+            const div = document.createElement('div');
+            div.className = 'response';
+            div.innerHTML = `<strong>Bot:</strong> ${response}`;
+            conversationDiv.appendChild(div);
+            conversationDiv.scrollTop = conversationDiv.scrollHeight;
+        }
+        
+        function addError(error) {
+            const div = document.createElement('div');
+            div.className = 'status error';
+            div.textContent = `Error: ${error}`;
+            conversationDiv.appendChild(div);
+        }
+        
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                audioChunks = [];
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        // Convert to base64 and send via WebSocket
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                            const base64Audio = btoa(String.fromCharCode(...new Uint8Array(reader.result)));
+                            
+                            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                                websocket.send(JSON.stringify({
+                                    type: 'audio_stream',
+                                    audio: base64Audio,
+                                    conversation_mode: conversationModeCheckbox.checked,
+                                    tts_language: languageSelect.value,
+                                    auto_respond: true
+                                }));
+                            }
+                        };
+                        reader.readAsArrayBuffer(event.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = () => {
+                    // Send end-of-stream signal
+                    if (websocket && websocket.readyState === WebSocket.OPEN) {
+                        websocket.send(JSON.stringify({
+                            type: 'audio_stream_end',
+                            conversation_mode: conversationModeCheckbox.checked,
+                            tts_language: languageSelect.value,
+                            auto_respond: true
+                        }));
+                    }
+                    
+                    // Clean up
+                    stream.getTracks().forEach(track => track.stop());
+                };
+                
+                // Start recording with small chunks for real-time processing
+                mediaRecorder.start(100); // 100ms chunks
+                isRecording = true;
+                
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                startBtn.textContent = '🔴 Recording...';
+                startBtn.className = 'recording';
+                
+            } catch (error) {
+                console.error('Error starting recording:', error);
+                addError('Failed to start recording. Please allow microphone access.');
+            }
+        }
+        
+        function stopRecording() {
+            if (mediaRecorder && isRecording) {
+                mediaRecorder.stop();
+                isRecording = false;
+                
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+                startBtn.textContent = '🎤 Start Conversation';
+                startBtn.className = '';
+            }
+        }
+        
+        function playAudioChunk(base64Chunk) {
+            // Convert base64 to blob and play
+            const audioData = atob(base64Chunk);
+            const arrayBuffer = new ArrayBuffer(audioData.length);
+            const view = new Uint8Array(arrayBuffer);
+            
+            for (let i = 0; i < audioData.length; i++) {
+                view[i] = audioData.charCodeAt(i);
+            }
+            
+            const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
+            const audio = new Audio(URL.createObjectURL(blob));
+            audio.play().catch(e => console.log('Audio play failed:', e));
+        }
+        
+        // Event listeners
+        startBtn.addEventListener('click', startRecording);
+        stopBtn.addEventListener('click', stopRecording);
+        
+        // Initialize
+        connectWebSocket();
+    </script>
+</body>
+</html>

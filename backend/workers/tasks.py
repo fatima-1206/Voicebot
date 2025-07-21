@@ -4,7 +4,7 @@ from backend.workers.celery_worker import celery_app
 import json
 from backend.response_generation.generator import generate_response
 from backend.db.connection import SessionLocal
-from uuid import UUID
+from uuid import UUID, uuid4
 from datetime import datetime
 import torch
 from contextlib import contextmanager
@@ -13,7 +13,7 @@ import gc
 import asyncio
 from faster_whisper import WhisperModel
 import tempfile
-model = WhisperModel("tiny", device="cuda", compute_type="float16")
+model = WhisperModel("medium", device="cuda", compute_type="float16")
 from silero_vad import load_silero_vad, get_speech_timestamps, collect_chunks
 import numpy as np
 import time
@@ -53,97 +53,65 @@ def manage_gpu_memory():
         gc.collect()
 
 
-# SPEECH-TO-TEXT TASKS---------------------------------------------------------
-# Replace the existing transcribe_chunk function with this:
+# OPTIMIZED WEBSOCKET-INTEGRATED STT TASKS------------------------------------
 
 @celery_app.task(name='transcribe_chunk', bind=True)
 def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tenant_id: str = None):
     """
     Transcribe audio chunk using direct numpy array processing (no temp files)
-    
-    Args:
-        audio_bytes: The audio data as bytes
-        user_id: User ID for routing the response
-        chunk_id: Unique identifier for this transcription chunk
-        tenant_id: Tenant ID for WebSocket routing (optional for backwards compatibility)
+    This is called directly from WebSocket audio streams
     """
-    print(f"🔄 [TASK START] Transcribing audio chunk {chunk_id} for user {user_id} (tenant: {tenant_id})")
-    print(f"   Audio bytes length: {len(audio_bytes)}")
+    print(f"🔄 [STT] Transcribing chunk {chunk_id} for user {user_id}")
     
     try:
         import numpy as np
         import torch
         import io
         import wave
-        import asyncio
         from datetime import datetime
-        
-        print(f"   📦 Imports successful")
         
         # Clear GPU cache at start
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            print(f"   🚀 GPU cache cleared")
         
         # Convert bytes to numpy array
-        print(f"   🔄 Converting bytes to numpy array...")
         audio_data = bytes_to_numpy_audio(audio_bytes)
         
         if audio_data is None or len(audio_data) == 0:
             raise ValueError("Could not convert audio bytes to numpy array")
         
-        print(f"   ✅ Audio data converted: {len(audio_data)} samples")
-        
         # Convert to tensor and clamp values
         audio_tensor = torch.from_numpy(audio_data).float()
         audio_tensor = torch.clamp(audio_tensor, -1.0, 1.0)
         
-        print(f"   ✅ Audio tensor created: {audio_tensor.shape}")
-        
-        # Apply VAD if available (optional enhancement)
+        # Apply VAD if available
         try:
-            print(f"   🔄 Applying VAD...")
-            # Get speech timestamps
             speech_timestamps = get_speech_timestamps(audio_tensor, vad_model, sampling_rate=sample_rate)
             
             if speech_timestamps:
-                # Extract only speech portions
                 speech_audio = collect_chunks(speech_timestamps, audio_tensor)
                 audio_data = speech_audio.numpy().astype(np.float32)
-                print(f"   ✅ VAD applied: {len(speech_timestamps)} speech segments found")
+                print(f"   ✅ VAD applied: {len(speech_timestamps)} speech segments")
             else:
-                print("   ⚠️ No speech detected in audio chunk")
-                # Still process the audio even if VAD doesn't detect speech
                 audio_data = audio_tensor.numpy().astype(np.float32)
                 
-        except ImportError:
-            print("   ⚠️ VAD not available, processing full audio chunk")
-            audio_data = audio_tensor.numpy().astype(np.float32)
         except Exception as vad_error:
             print(f"   ⚠️ VAD error: {vad_error}, processing full audio chunk")
             audio_data = audio_tensor.numpy().astype(np.float32)
         
-        # Transcribe using Whisper model directly on numpy array
-        print(f"   📝 Starting transcription at {datetime.now().strftime('%H:%M:%S')}")
+        # Transcribe using Whisper model
         start_time = time.time()
-        
-        # Use different settings based on device
         device = "cuda" if torch.cuda.is_available() else "cpu"
         language = "en"  # You can make this configurable
-        
-        print(f"   🎯 Using device: {device}")
         
         if device == 'cpu':
             segments, info = model.transcribe(audio_data, beam_size=1, language=language, task="transcribe")
         else:
             segments, info = model.transcribe(audio_data, beam_size=5, language=language, task="transcribe", vad_filter=True)
         
-        end_time = time.time()
-        transcription_duration = end_time - start_time
+        transcription_duration = time.time() - start_time
         
-        print(f"   ✅ Whisper transcription completed in {transcription_duration:.2f}s")
-        
-        # Collect all transcript segments
+        # Collect transcript segments
         transcript_parts = []
         segment_details = []
         
@@ -157,13 +125,10 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
                 })
         
         full_transcript = " ".join(transcript_parts)
-        
-        # Get transcription info
         confidence = getattr(info, 'language_probability', 0.0)
         detected_language = getattr(info, 'language', 'unknown')
         
-        print(f"   ✅ Transcription completed: '{full_transcript[:50]}...'")
-        print(f"   📊 Confidence: {confidence}, Language: {detected_language}")
+        print(f"   ✅ Transcribed: '{full_transcript[:50]}...'")
         
         # Clear GPU cache after processing
         if torch.cuda.is_available():
@@ -171,7 +136,6 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
         
         # Send results back via WebSocket if tenant_id is provided
         if tenant_id:
-            print(f"   📡 Sending results via WebSocket...")
             send_transcription_result_via_websocket(
                 tenant_id=tenant_id,
                 user_id=user_id,
@@ -182,11 +146,7 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
                 segments=segment_details,
                 processing_time=transcription_duration
             )
-        else:
-            print(f"   ⚠️ No tenant_id provided, skipping WebSocket notification")
 
-        print(f"🎉 [TASK SUCCESS] Chunk {chunk_id} processed successfully")
-        
         return {
             "status": "success",
             "user_id": user_id,
@@ -196,20 +156,18 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
             "confidence": confidence,
             "detected_language": detected_language,
             "processing_time": transcription_duration,
-            "audio_duration": len(audio_data) / 16000,  # Approximate duration assuming 16kHz
+            "audio_duration": len(audio_data) / 16000,
             "worker": self.request.hostname
         }
         
     except Exception as e:
-        print(f"❌ [TASK ERROR] Error transcribing audio chunk {chunk_id}: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ [STT] Error transcribing chunk {chunk_id}: {e}")
         
         # Clear GPU cache on error
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        # Send error back via WebSocket if tenant_id is provided
+        # Send error back via WebSocket
         if tenant_id:
             send_transcription_error_via_websocket(
                 tenant_id=tenant_id,
@@ -226,10 +184,96 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
             "worker": self.request.hostname
         }
 
+@celery_app.task(name='transcribe_and_respond', bind=True)
+def transcribe_and_respond_task(self, audio_bytes: bytes, user_id: str, chunk_id: str, 
+                               tenant_id: str = None, conversation_mode: bool = True,
+                               tts_language: str = "en", voice: str = "", 
+                               auto_respond: bool = True):
+    """
+    Real-time conversation task: STT → (optionally RAG → TTS)
+    This is called from WebSocket when conversation_mode=True
+    """
+    print(f"🔄 [CONVERSATION] Processing audio chunk {chunk_id}")
+    
+    try:
+        # Step 1: Do STT first
+        stt_result = transcribe_chunk(audio_bytes, user_id, chunk_id, tenant_id)
+        
+        if stt_result['status'] != 'success':
+            return stt_result
+            
+        transcript = stt_result['transcript']
+        
+        # Step 2: Check if we should auto-respond
+        if auto_respond and conversation_mode and should_respond_to_transcript(transcript):
+            print(f"🤖 [CONVERSATION] Auto-responding to: '{transcript}'")
+            
+            # Immediately trigger RAG + TTS response in background
+            response_id = str(uuid4())
+            
+            # Use the optimized query+TTS task for immediate response
+            process_query_with_tts_task.delay(
+                query_id=response_id,
+                tts_task_id=str(uuid4()),
+                query=transcript,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                language=tts_language,
+                voice=voice,
+                stream_audio=True,
+                session_id=None  # Could be passed from WebSocket
+            )
+            
+            # Update STT result to indicate response is being generated
+            stt_result['auto_response_triggered'] = True
+            stt_result['response_id'] = response_id
+        
+        return stt_result
+        
+    except Exception as e:
+        print(f"❌ [CONVERSATION] Error: {e}")
+        return {
+            "status": "error",
+            "chunk_id": chunk_id,
+            "error": str(e),
+            "worker": self.request.hostname
+        }
+
+def should_respond_to_transcript(transcript: str) -> bool:
+    """
+    Determine if the transcript warrants an immediate response
+    Enhanced with better conversation detection
+    """
+    if not transcript or len(transcript.strip()) < 3:
+        return False
+        
+    transcript = transcript.strip().lower()
+    
+    # Respond to questions
+    if transcript.endswith('?'):
+        return True
+        
+    # Respond to common conversation starters/phrases
+    conversation_triggers = [
+        'hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening',
+        'what is', 'tell me', 'how do', 'can you', 'please', 'help me',
+        'i need', 'i want', 'explain', 'show me', 'where is', 'when is',
+        'who is', 'why', 'how much', 'how many', 'thank you', 'thanks'
+    ]
+    
+    for trigger in conversation_triggers:
+        if trigger in transcript:
+            return True
+    
+    # Respond to complete sentences (basic check)
+    if len(transcript.split()) >= 4 and (transcript.endswith('.') or transcript.endswith('!')):
+        return True
+        
+    return False
+
 def bytes_to_numpy_audio(audio_bytes: bytes) -> np.ndarray:
     """
-    Convert audio bytes to numpy array
-    Handles both raw PCM and WAV format
+    Convert audio bytes to numpy array - handles multiple formats
     """
     try:
         import numpy as np
@@ -240,13 +284,11 @@ def bytes_to_numpy_audio(audio_bytes: bytes) -> np.ndarray:
         try:
             with io.BytesIO(audio_bytes) as wav_io:
                 with wave.open(wav_io, 'rb') as wav_file:
-                    # Get audio parameters
                     frames = wav_file.getnframes()
                     sample_rate = wav_file.getframerate()
                     sample_width = wav_file.getsampwidth()
                     channels = wav_file.getnchannels()
                     
-                    # Read audio data
                     audio_data = wav_file.readframes(frames)
                     
                     # Convert to numpy array
@@ -266,63 +308,33 @@ def bytes_to_numpy_audio(audio_bytes: bytes) -> np.ndarray:
                     if channels == 2:
                         audio_array = audio_array.reshape(-1, 2).mean(axis=1)
                     
-                    print(f"✅ Parsed WAV: {sample_rate}Hz, {channels}ch, {sample_width}B, {len(audio_array)} samples")
                     return audio_array
                     
-        except Exception as wav_error:
-            print(f"⚠️ WAV parsing failed: {wav_error}")
+        except Exception:
+            pass
         
         # Fallback: assume raw 16-bit PCM
         try:
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
             audio_array = audio_array.astype(np.float32) / 32768.0
-            print(f"✅ Parsed as raw PCM: {len(audio_array)} samples")
             return audio_array
-        except Exception as pcm_error:
-            print(f"❌ PCM parsing failed: {pcm_error}")
+        except Exception:
+            pass
             
         # Last resort: try as float32
         try:
             audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
-            print(f"✅ Parsed as float32: {len(audio_array)} samples")
             return audio_array
-        except Exception as float_error:
-            print(f"❌ Float32 parsing failed: {float_error}")
+        except Exception:
+            pass
             
         return None
         
     except Exception as e:
-        print(f"❌ Error converting audio bytes to numpy: {e}")
+        print(f"❌ Error converting audio bytes: {e}")
         return None
 
-# Replace the existing transcribe_chunk task's WebSocket messaging section
-# Around lines 150-190, replace the asyncio.run calls with:
-        # Send results back via WebSocket if tenant_id is provided
-        if tenant_id:
-            send_transcription_result_via_websocket(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                chunk_id=chunk_id,
-                transcript=full_transcript,
-                confidence=confidence,
-                detected_language=detected_language,
-                segments=segment_details,
-                processing_time=transcription_duration
-            )
-
-        # ... existing return statement ...
-
-        # In the exception handler, replace the asyncio.run call with:
-        # Send error back via WebSocket if tenant_id is provided
-        if tenant_id:
-            send_transcription_error_via_websocket(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                chunk_id=chunk_id,
-                error=str(e)
-            )
-
-# Replace the async WebSocket functions (around lines 275-320) with these synchronous versions:
+# WebSocket messaging functions (synchronous for Redis)
 def send_transcription_result_via_websocket(tenant_id: str, user_id: str, chunk_id: str, 
                                           transcript: str, confidence: float, detected_language: str,
                                           segments: list, processing_time: float):
@@ -342,10 +354,10 @@ def send_transcription_result_via_websocket(tenant_id: str, user_id: str, chunk_
         # Publish message to Redis channel
         channel = f"ws:{tenant_id}:{user_id}"
         redis_client.publish(channel, json.dumps(message))
-        print(f"✅ Transcription result sent via Redis: {transcript[:30]}...")
+        print(f"✅ Transcription sent via Redis: {transcript[:30]}...")
         
     except Exception as e:
-        print(f"❌ Error sending transcription result via Redis: {e}")
+        print(f"❌ Error sending transcription via Redis: {e}")
 
 def send_transcription_error_via_websocket(tenant_id: str, user_id: str, chunk_id: str, error: str):
     """Send transcription error via Redis for WebSocket delivery"""
@@ -357,164 +369,14 @@ def send_transcription_error_via_websocket(tenant_id: str, user_id: str, chunk_i
             "timestamp": datetime.utcnow().isoformat()
         }
         
-        # Publish message to Redis channel
         channel = f"ws:{tenant_id}:{user_id}"
         redis_client.publish(channel, json.dumps(message))
-        print(f"❌ Transcription error sent via Redis: {error}")
         
     except Exception as e:
         print(f"❌ Error sending transcription error via Redis: {e}")
 
 
-# DOCUMENTS RELATED TASKS---------------------------------------------------------
-@celery_app.task(name='process_uploaded_document')
-def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public):
-    """Process uploaded document - extract text, create chunks, etc."""
-    print(f"🔄 Task started for document: {filename} (doc_id: {doc_id})")
-    
-    try:
-        from backend.db.connection import SessionLocal
-        from backend.rag.add_document import process_uploaded_document as process_doc
-        from sqlalchemy import text
-        
-        print(f"📊 Processing document with {len(file_bytes)} bytes")
-        
-        # Create database session with error handling
-        db = SessionLocal()
-        
-        try:
-            # Test database connection before proceeding (fixed SQL)
-            db.execute(text("SELECT 1")).fetchone()
-            print("✅ Database connection verified in task")
-            
-            # Convert file_bytes back to bytes if it was encoded as string
-            if isinstance(file_bytes, str):
-                file_bytes = file_bytes.encode("latin1")
-                print(f"🔧 Converted string to bytes: {len(file_bytes)} bytes")
-            
-            # Process the document (INCLUDE db parameter!)
-            result = process_doc(
-                file_bytes=file_bytes,
-                filename=filename,
-                doc_id=doc_id,
-                tenant_id=tenant_id,
-                user_id=user_id,
-                is_public=is_public
-                # db=db  # Don't forget this!
-            )
-            print(f"✅ Document processing completed: {result}")
-            return result
-            
-        except Exception as db_error:
-            print(f"❌ Database error in task: {db_error}")
-            db.rollback()
-            raise db_error
-        finally:
-            db.close()
-            
-    except Exception as e:
-        print(f"❌ Error processing document: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"status": "error", "error": str(e)}
-
-@celery_app.task(name='update_document_visibility')
-def update_document_visibility(doc_id: str, is_public: bool, tenant_id: str):
-    """Update document visibility"""
-    print(f"🔄 Updating visibility for document {doc_id} to {'public' if is_public else 'private'}")
-    
-    with get_db_session() as db:
-        try:
-            from backend.db.models import Document as DB_Document
-            from uuid import UUID
-            
-            doc_uuid = UUID(doc_id) if isinstance(doc_id, str) else doc_id
-            tenant_uuid = UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
-            
-            # Update document metadata
-            document = db.query(DB_Document).filter(DB_Document.id == doc_uuid).first()
-            if not document:
-                raise ValueError(f"Document with ID {doc_id} not found")
-            
-            document.is_public = is_public
-            document.status = "processed"
-            db.commit()
-            
-            # Rebuild retrievers to reflect visibility change
-            try:
-                from backend.rag import retrieverconstruction
-                retrieverconstruction.clear_cache()
-                faiss_db, hybrid_retriever = retrieverconstruction.construct_retrievers(
-                    include_postgres=True,
-                    force_rebuild=True
-                )
-                print("✅ Retrievers rebuilt successfully")
-            except Exception as e:
-                print(f"❌ Error rebuilding retrievers: {e}")
-            
-            return {
-                "status": "success",
-                "doc_id": str(doc_uuid),
-                "filename": document.filename,
-                "is_public": is_public,
-                "message": f"Document visibility updated successfully"
-            }
-            
-        except Exception as e:
-            print(f"❌ Error updating document visibility: {e}")
-            return {"status": "error", "error": str(e)}
-
-
-# QUERY HANDLING------------------------------------------------------------------
-@celery_app.task(name='process_query', bind=True) 
-def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id: str, 
-                    max_tokens: int = 500, temperature: float = 0.7, session_id: str = None):
-    """Process a user query using RAG pipeline asynchronously"""
-    print(f"🔄 Processing query {query_id}: {query[:50]}...")
-    
-    with manage_gpu_memory():
-        try:
-            # Generate response
-            from backend.response_generation.generator import generate_response
-            response = generate_response(query)
-            
-            # Save to database efficiently
-            with get_db_session() as db:
-                from backend.db.models import QueryLog as DB_QueryLog
-                
-                query_log_record = DB_QueryLog(
-                    id=UUID(query_id),
-                    user_id=UUID(user_id),
-                    session_id=UUID(session_id) if session_id and session_id != 'string' else None,
-                    query=query,
-                    response=response,
-                    timestamp=datetime.utcnow()
-                )
-                db.add(query_log_record)
-                db.commit()
-            
-            return {
-                "status": "success",
-                "query_id": query_id,
-                "query": query,
-                "response": response,
-                "tenant_id": tenant_id,
-                "user_id": user_id,
-                "session_id": session_id,
-                "worker": self.request.hostname
-            }
-            
-        except Exception as e:
-            print(f"❌ Error processing query: {e}")
-            import traceback
-            traceback.print_exc()
-            return {
-                "status": "error",
-                "query_id": query_id,
-                "query": query,
-                "error": str(e),
-                "worker": self.request.hostname
-            }
+# OPTIMIZED QUERY + TTS PIPELINE----------------------------------------------
 
 @celery_app.task(name='process_query_with_tts', bind=True)
 def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: str, tenant_id: str, 
@@ -522,130 +384,31 @@ def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: st
                             session_id: str = None, language: str = "en", voice: str = "",
                             stream_audio: bool = True):
     """
-    Optimized task that processes query → generates TTS → streams audio via WebSocket
-    This reduces latency by chaining operations and streaming immediately
+    Optimized task: Query → RAG → TTS → Stream Audio
+    This is the main pipeline for conversation responses
     """
-    import asyncio
-    print(f"🔄 Processing query with TTS: {query[:50]}...")
+    print(f"🔄 [QUERY+TTS] Processing: {query[:50]}...")
     
     with manage_gpu_memory():
         try:
             # Step 1: Generate text response
-            print("📝 Generating text response...")
             from backend.response_generation.generator import generate_response
             response_text = generate_response(query)
-            print(f"✅ Text response generated: {response_text[:50]}...")
+            print(f"✅ [RAG] Generated: {response_text[:50]}...")
             
             # Step 2: Immediately notify WebSocket that text is ready
-            asyncio.run(send_text_response_via_websocket(
-                tenant_id, user_id, query_id, query, response_text
-            ))
+            notify_text_response_ready(tenant_id, user_id, query_id, query, response_text)
             
-            # Step 3: Process TTS with optimized settings for streaming
-            print("🎵 Starting TTS processing...")
-            import asyncio
-            import edge_tts
-            import os
-            import uuid
-            from datetime import datetime
-            import base64
-            
-            # Set voice based on language
-            if language == "ur" and not voice:
-                voice = "ur-PK-UzmaNeural"
-            elif language == "en" and not voice:
-                voice = "en-US-JennyNeural"
-            elif not voice:
-                voice = "en-US-JennyNeural"
-            
-            # Generate filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"tts_{timestamp}_{tts_task_id[:8]}.wav"
-            output_dir = "backend/rag/temp_audioFiles"
-            os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(output_dir, filename)
-            
-            # Step 4: Generate audio with streaming capability
-            async def generate_and_stream_audio():
-                """Generate TTS and stream chunks via WebSocket for minimal latency"""
-                try:
-                    # Notify WebSocket that audio generation started
-                    await send_audio_status_via_websocket(
-                        tenant_id, user_id, tts_task_id, "generating", 
-                        {"message": "Audio generation started"}
-                    )
-                    
-                    # Generate audio
-                    communicate = edge_tts.Communicate(response_text, voice)
-                    audio_chunks = []
-                    
-                    with open(output_path, "wb") as f:
-                        async for chunk in communicate.stream():
-                            if chunk["type"] == "audio":
-                                f.write(chunk["data"])
-                                audio_chunks.append(chunk["data"])
-                    
-                    # Step 5: Stream audio immediately via WebSocket
-                    if stream_audio and os.path.exists(output_path):
-                        file_size = os.path.getsize(output_path)
-                        
-                        # Send audio file info first
-                        await send_audio_status_via_websocket(
-                            tenant_id, user_id, tts_task_id, "ready",
-                            {
-                                "filename": filename,
-                                "file_size": file_size,
-                                "audio_url": f"/tts/download/{filename}",
-                                "voice": voice,
-                                "language": language
-                            }
-                        )
-                        
-                        # Stream audio data in chunks for immediate playback
-                        await stream_audio_file_via_websocket(
-                            tenant_id, user_id, output_path, tts_task_id
-                        )
-                        
-                        print(f"✅ Audio streamed successfully: {filename}")
-                    
-                    return {
-                        "output_path": output_path,
-                        "filename": filename,
-                        "file_size": os.path.getsize(output_path) if os.path.exists(output_path) else 0
-                    }
-                    
-                except Exception as e:
-                    print(f"❌ Error in audio generation/streaming: {e}")
-                    await send_audio_status_via_websocket(
-                        tenant_id, user_id, tts_task_id, "error",
-                        {"error": str(e)}
-                    )
-                    raise e
-            
-            # Run the async audio generation
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                audio_result = loop.run_until_complete(generate_and_stream_audio())
-            finally:
-                loop.close()
-            
-            # Step 6: Save to database
-            with get_db_session() as db:
-                from backend.db.models import QueryLog as DB_QueryLog
-                
-                query_log_record = DB_QueryLog(
-                    id=UUID(query_id),
-                    user_id=UUID(user_id),
-                    session_id=UUID(session_id) if session_id and session_id != 'string' else None,
-                    query=query,
-                    response=response_text,
-                    timestamp=datetime.utcnow()
+            # Step 3: Process TTS with streaming
+            if stream_audio:
+                audio_result = generate_and_stream_tts(
+                    response_text, tenant_id, user_id, tts_task_id, language, voice
                 )
-                db.add(query_log_record)
-                db.commit()
+            else:
+                audio_result = generate_tts_file(response_text, tts_task_id, language, voice)
             
-            print(f"✅ Complete pipeline finished: {query_id}")
+            # Step 4: Save to database
+            save_query_to_database(query_id, user_id, session_id, query, response_text)
             
             return {
                 "status": "success",
@@ -653,118 +416,295 @@ def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: st
                 "tts_task_id": tts_task_id,
                 "query": query,
                 "response": response_text,
-                "audio_file": audio_result["filename"],
-                "file_size": audio_result["file_size"],
-                "language": language,
-                "voice": voice,
-                "tenant_id": tenant_id,
-                "user_id": user_id,
+                "audio_result": audio_result,
                 "worker": self.request.hostname
             }
             
         except Exception as e:
-            print(f"❌ Error in query with TTS pipeline: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"❌ [QUERY+TTS] Error: {e}")
             
             # Notify WebSocket of error
-            asyncio.run(send_error_via_websocket(
-                tenant_id, user_id, query_id, str(e)
-            ))
+            notify_error(tenant_id, user_id, query_id, str(e))
             
             return {
                 "status": "error",
                 "query_id": query_id,
-                "tts_task_id": tts_task_id,
                 "error": str(e),
                 "worker": self.request.hostname
             }
 
-
-
-# TEXT-TO-SPEECH TASKS-------------------------------------------------------------
-@celery_app.task(name='process_tts', bind=True)
-def process_tts_task(self, text: str, language: str, voice: str = "", output_filename: str = None, play_audio: bool = False):
-    """
-    Process Text-to-Speech conversion asynchronously
+def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id: str, 
+                           language: str, voice: str) -> dict:
+    """Generate TTS and stream via WebSocket"""
+    import asyncio
+    import edge_tts
+    import os
+    from datetime import datetime
     
-    Args:
-        text (str): The text to convert to speech
-        language (str): The language of the text ('ur' for Urdu, 'en' for English)
-        voice (str): Optional specific voice to use
-        output_filename (str): Optional custom filename for output
-        play_audio (bool): Whether to play audio (only works if worker has audio output)
+    # Set voice based on language
+    if language == "ur" and not voice:
+        voice = "ur-PK-UzmaNeural"
+    elif language == "en" and not voice:
+        voice = "en-US-JennyNeural"
+    elif not voice:
+        voice = "en-US-JennyNeural"
     
-    Returns:
-        dict: Status and file path information
-    """
-    print(f"🔄 Processing TTS task: {text[:50]}...")
+    # Generate filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"tts_{timestamp}_{tts_task_id[:8]}.wav"
+    output_dir = "backend/rag/temp_audioFiles"
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, filename)
     
-    try:
-        import asyncio
-        import edge_tts
-        import soundfile as sf
-        import sounddevice as sd
-        import os
-        import uuid
-        from datetime import datetime
-        
-        # Set default voices based on language
-        if language == "ur" and not voice:
-            voice = "ur-PK-UzmaNeural"
-        elif language == "en" and not voice:
-            voice = "en-US-JennyNeural"
-        elif not voice:
-            voice = "en-US-JennyNeural"  # Default fallback
-        
-        # Generate unique filename if not provided
-        if not output_filename:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            unique_id = str(uuid.uuid4())[:8]
-            output_filename = f"tts_{timestamp}_{unique_id}.wav"
-        
-        # Ensure the filename has .wav extension
-        if not output_filename.endswith('.wav'):
-            output_filename += '.wav'
-        
-        # Ensure output directory exists
-        output_dir = "backend/rag/temp_audioFiles"
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, output_filename)
-        
-        async def synthesize_text_async(text, voice, output_file):
-            """Async function to synthesize text to speech"""
+    async def generate_and_stream():
+        try:
+            # Notify start
+            notify_audio_status(tenant_id, user_id, tts_task_id, "generating", 
+                              {"message": "Audio generation started"})
+            
+            # Generate audio
             communicate = edge_tts.Communicate(text, voice)
-            with open(output_file, "wb") as f:
+            
+            with open(output_path, "wb") as f:
                 async for chunk in communicate.stream():
                     if chunk["type"] == "audio":
                         f.write(chunk["data"])
+            
+            # Notify ready and stream
+            if os.path.exists(output_path):
+                file_size = os.path.getsize(output_path)
+                
+                notify_audio_status(tenant_id, user_id, tts_task_id, "ready", {
+                    "filename": filename,
+                    "file_size": file_size,
+                    "audio_url": f"/tts/download/{filename}",
+                    "voice": voice,
+                    "language": language
+                })
+                
+                # Stream audio file
+                await stream_audio_file(tenant_id, user_id, output_path, tts_task_id)
+                
+                return {"filename": filename, "file_size": file_size}
+            
+        except Exception as e:
+            notify_audio_status(tenant_id, user_id, tts_task_id, "error", {"error": str(e)})
+            raise e
+    
+    # Run async generation
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(generate_and_stream())
+    finally:
+        loop.close()
+
+def generate_tts_file(text: str, tts_task_id: str, language: str, voice: str) -> dict:
+    """Generate TTS file without streaming"""
+    import asyncio
+    import edge_tts
+    import os
+    from datetime import datetime
+    
+    # Set voice
+    if language == "ur" and not voice:
+        voice = "ur-PK-UzmaNeural"
+    elif language == "en" and not voice:
+        voice = "en-US-JennyNeural"
+    elif not voice:
+        voice = "en-US-JennyNeural"
+    
+    # Generate filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"tts_{timestamp}_{tts_task_id[:8]}.wav"
+    output_dir = "backend/rag/temp_audioFiles"
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, filename)
+    
+    async def generate():
+        communicate = edge_tts.Communicate(text, voice)
+        with open(output_path, "wb") as f:
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    f.write(chunk["data"])
+    
+    # Run generation
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(generate())
+        return {
+            "filename": filename, 
+            "file_size": os.path.getsize(output_path) if os.path.exists(output_path) else 0
+        }
+    finally:
+        loop.close()
+
+async def stream_audio_file(tenant_id: str, user_id: str, file_path: str, tts_task_id: str):
+    """Stream audio file in chunks via WebSocket"""
+    try:
+        import base64
         
-        # Run the async synthesis
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        chunk_size = 4096  # 4KB chunks
+        
+        with open(file_path, "rb") as audio_file:
+            chunk_number = 0
+            while True:
+                chunk = audio_file.read(chunk_size)
+                if not chunk:
+                    break
+                
+                chunk_b64 = base64.b64encode(chunk).decode('utf-8')
+                
+                # Send via Redis
+                message = {
+                    "type": "audio_chunk",
+                    "tts_task_id": tts_task_id,
+                    "chunk_number": chunk_number,
+                    "chunk_data": chunk_b64,
+                    "is_final": False
+                }
+                
+                channel = f"ws:{tenant_id}:{user_id}"
+                redis_client.publish(channel, json.dumps(message))
+                
+                chunk_number += 1
+                await asyncio.sleep(0.01)  # Small delay
+        
+        # Send final chunk marker
+        final_message = {
+            "type": "audio_chunk",
+            "tts_task_id": tts_task_id,
+            "chunk_number": chunk_number,
+            "chunk_data": "",
+            "is_final": True
+        }
+        
+        channel = f"ws:{tenant_id}:{user_id}"
+        redis_client.publish(channel, json.dumps(final_message))
+        
+    except Exception as e:
+        print(f"❌ Error streaming audio: {e}")
+
+# Helper notification functions (using Redis)
+def notify_text_response_ready(tenant_id: str, user_id: str, query_id: str, query: str, response: str):
+    """Notify that text response is ready"""
+    try:
+        message = {
+            "type": "query_response",
+            "query_id": query_id,
+            "query": query,
+            "response": response,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        channel = f"ws:{tenant_id}:{user_id}"
+        redis_client.publish(channel, json.dumps(message))
+        
+    except Exception as e:
+        print(f"❌ Error notifying text response: {e}")
+
+def notify_audio_status(tenant_id: str, user_id: str, tts_task_id: str, status: str, data: dict):
+    """Notify audio status updates"""
+    try:
+        message = {
+            "type": "audio_status",
+            "tts_task_id": tts_task_id,
+            "status": status,
+            "data": data,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        channel = f"ws:{tenant_id}:{user_id}"
+        redis_client.publish(channel, json.dumps(message))
+        
+    except Exception as e:
+        print(f"❌ Error notifying audio status: {e}")
+
+def notify_error(tenant_id: str, user_id: str, query_id: str, error: str):
+    """Notify error via WebSocket"""
+    try:
+        message = {
+            "type": "error",
+            "query_id": query_id,
+            "error": error,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        channel = f"ws:{tenant_id}:{user_id}"
+        redis_client.publish(channel, json.dumps(message))
+        
+    except Exception as e:
+        print(f"❌ Error notifying error: {e}")
+
+def save_query_to_database(query_id: str, user_id: str, session_id: str, query: str, response: str):
+    """Save query log to database"""
+    try:
+        with get_db_session() as db:
+            from backend.db.models import QueryLog as DB_QueryLog
+            
+            query_log_record = DB_QueryLog(
+                id=UUID(query_id),
+                user_id=UUID(user_id),
+                session_id=UUID(session_id) if session_id and session_id != 'string' else None,
+                query=query,
+                response=response,
+                timestamp=datetime.utcnow()
+            )
+            db.add(query_log_record)
+            db.commit()
+            
+    except Exception as e:
+        print(f"❌ Error saving to database: {e}")
+
+
+# REGULAR PROCESSING TASKS (for non-conversation mode)------------------------
+
+@celery_app.task(name='process_query', bind=True)
+def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id: str, 
+                    max_tokens: int = 500, temperature: float = 0.7, session_id: str = None):
+    """Process a user query using RAG pipeline (text only)"""
+    print(f"🔄 [QUERY] Processing: {query[:50]}...")
+    
+    with manage_gpu_memory():
         try:
-            loop.run_until_complete(synthesize_text_async(text, voice, output_path))
-        finally:
-            loop.close()
-        
-        # Verify file was created and get file size
-        if not os.path.exists(output_path):
-            raise FileNotFoundError(f"TTS output file was not created: {output_path}")
-        
-        file_size = os.path.getsize(output_path)
-        
-        # Optional: Play audio (only if requested and audio output is available)
-        if play_audio:
-            try:
-                data, samplerate = sf.read(output_path, dtype='float32')
-                sd.play(data, samplerate)
-                sd.wait()
-                print(f"✅ Audio played successfully")
-            except Exception as audio_error:
-                print(f"⚠️ Could not play audio: {audio_error}")
-        
-        print(f"✅ TTS task completed: {output_filename} ({file_size} bytes)")
+            # Generate response
+            response = generate_response(query)
+            
+            # Save to database
+            save_query_to_database(query_id, user_id, session_id, query, response)
+            
+            # Notify via WebSocket
+            notify_text_response_ready(tenant_id, user_id, query_id, query, response)
+            
+            return {
+                "status": "success",
+                "query_id": query_id,
+                "query": query,
+                "response": response,
+                "worker": self.request.hostname
+            }
+            
+        except Exception as e:
+            print(f"❌ [QUERY] Error: {e}")
+            notify_error(tenant_id, user_id, query_id, str(e))
+            
+            return {
+                "status": "error",
+                "query_id": query_id,
+                "error": str(e),
+                "worker": self.request.hostname
+            }
+
+@celery_app.task(name='process_tts', bind=True)
+def process_tts_task(self, text: str, language: str, voice: str = "", output_filename: str = None, play_audio: bool = False):
+    """
+    Process Text-to-Speech conversion (standalone TTS)
+    """
+    print(f"🔄 [TTS] Processing: {text[:50]}...")
+    
+    try:
+        result = generate_tts_file(text, str(uuid4()), language, voice)
         
         return {
             "status": "success",
@@ -772,17 +712,13 @@ def process_tts_task(self, text: str, language: str, voice: str = "", output_fil
             "text": text,
             "language": language,
             "voice": voice,
-            "output_file": output_path,
-            "filename": output_filename,
-            "file_size": file_size,
-            "audio_played": play_audio,
+            "output_file": result["filename"],
+            "file_size": result["file_size"],
             "worker": self.request.hostname
         }
         
     except Exception as e:
-        print(f"❌ Error in TTS task: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ [TTS] Error: {e}")
         return {
             "status": "error",
             "task_id": self.request.id,
@@ -792,95 +728,129 @@ def process_tts_task(self, text: str, language: str, voice: str = "", output_fil
         }
 
 
-# QUERY HANDLING HELPER FUNCTIONS-----------------------------------------------
-# Helper functions for WebSocket communication
-async def send_text_response_via_websocket(tenant_id: str, user_id: str, query_id: str, query: str, response: str):
-    """Send text response via WebSocket"""
+# DOCUMENT PROCESSING TASKS (unchanged)--------------------------------------
+
+@celery_app.task(name='process_uploaded_document')
+def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public):
+    """Process uploaded document - extract text, create chunks, etc."""
+    print(f"🔄 [DOC] Processing: {filename}")
+    
     try:
-        from backend.main import manager  # Import the WebSocket manager
+        from backend.db.connection import SessionLocal
+        from backend.rag.add_document import process_uploaded_document as process_doc
+        from sqlalchemy import text
         
-        await manager.send_json_to_user(tenant_id, user_id, {
-            "type": "query_response",
-            "query_id": query_id,
-            "query": query,
-            "response": response,
-            "timestamp": datetime.utcnow().isoformat()
-        })
+        db = SessionLocal()
+        
+        try:
+            db.execute(text("SELECT 1")).fetchone()
+            
+            if isinstance(file_bytes, str):
+                file_bytes = file_bytes.encode("latin1")
+            
+            result = process_doc(
+                file_bytes=file_bytes,
+                filename=filename,
+                doc_id=doc_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                is_public=is_public
+            )
+            
+            return result
+            
+        except Exception as db_error:
+            db.rollback()
+            raise db_error
+        finally:
+            db.close()
+            
     except Exception as e:
-        print(f"❌ Error sending text response via WebSocket: {e}")
+        print(f"❌ [DOC] Error: {e}")
+        return {"status": "error", "error": str(e)}
 
-async def send_audio_status_via_websocket(tenant_id: str, user_id: str, tts_task_id: str, status: str, data: dict):
-    """Send audio status updates via WebSocket"""
+@celery_app.task(name='update_document_visibility')
+def update_document_visibility(doc_id: str, is_public: bool, tenant_id: str):
+    """Update document visibility"""
+    print(f"🔄 [DOC] Updating visibility for {doc_id}")
+    
+    with get_db_session() as db:
+        try:
+            from backend.db.models import Document as DB_Document
+            from uuid import UUID
+            
+            doc_uuid = UUID(doc_id) if isinstance(doc_id, str) else doc_id
+            
+            document = db.query(DB_Document).filter(DB_Document.id == doc_uuid).first()
+            if not document:
+                raise ValueError(f"Document with ID {doc_id} not found")
+            
+            document.is_public = is_public
+            document.status = "processed"
+            db.commit()
+            
+            # Rebuild retrievers
+            try:
+                from backend.rag import retrieverconstruction
+                retrieverconstruction.clear_cache()
+                retrieverconstruction.construct_retrievers(
+                    include_postgres=True,
+                    force_rebuild=True
+                )
+            except Exception as e:
+                print(f"❌ Error rebuilding retrievers: {e}")
+            
+            return {
+                "status": "success",
+                "doc_id": str(doc_uuid),
+                "is_public": is_public,
+                "message": "Document visibility updated successfully"
+            }
+            
+        except Exception as e:
+            print(f"❌ [DOC] Error updating visibility: {e}")
+            return {"status": "error", "error": str(e)}
+
+
+# LEGACY PIPELINE TASKS (for backward compatibility)-------------------------
+# Keep the existing pipeline tasks for any legacy integrations
+
+from celery import chain
+
+@celery_app.task(name='audio_to_audio_pipeline')
+def audio_to_audio_pipeline(pipeline_id: str, audio_bytes: bytes, tenant_id: str, 
+                          user_id: str, stt_language: str = "en", tts_language: str = "en",
+                          voice: str = "", session_id: str = None):
+    """
+    Legacy pipeline: STT → RAG → TTS
+    Use transcribe_and_respond_task instead for better performance
+    """
+    print(f"🚀 [LEGACY-PIPELINE] Starting {pipeline_id}")
+    
     try:
-        from backend.main import manager
+        # Just use the new optimized task
+        chunk_id = str(uuid4())
+        result = transcribe_and_respond_task(
+            audio_bytes=audio_bytes,
+            user_id=user_id,
+            chunk_id=chunk_id,
+            tenant_id=tenant_id,
+            conversation_mode=True,
+            tts_language=tts_language,
+            voice=voice,
+            auto_respond=True
+        )
         
-        await manager.send_json_to_user(tenant_id, user_id, {
-            "type": "audio_status",
-            "tts_task_id": tts_task_id,
-            "status": status,
-            "data": data,
-            "timestamp": datetime.utcnow().isoformat()
-        })
-    except Exception as e:
-        print(f"❌ Error sending audio status via WebSocket: {e}")
-
-async def stream_audio_file_via_websocket(tenant_id: str, user_id: str, file_path: str, tts_task_id: str):
-    """Stream audio file in chunks via WebSocket for immediate playback"""
-    try:
-        from backend.main import manager
-        import base64
-        
-        chunk_size = 4096  # 4KB chunks for smooth streaming
-        
-        with open(file_path, "rb") as audio_file:
-            chunk_number = 0
-            while True:
-                chunk = audio_file.read(chunk_size)
-                if not chunk:
-                    break
-                
-                # Encode chunk as base64 for WebSocket transmission
-                chunk_b64 = base64.b64encode(chunk).decode('utf-8')
-                
-                await manager.send_json_to_user(tenant_id, user_id, {
-                    "type": "audio_chunk",
-                    "tts_task_id": tts_task_id,
-                    "chunk_number": chunk_number,
-                    "chunk_data": chunk_b64,
-                    "is_final": False
-                })
-                
-                chunk_number += 1
-                
-                # Small delay to prevent overwhelming the WebSocket
-                await asyncio.sleep(0.01)
-        
-        # Send final chunk marker
-        await manager.send_json_to_user(tenant_id, user_id, {
-            "type": "audio_chunk",
-            "tts_task_id": tts_task_id,
-            "chunk_number": chunk_number,
-            "chunk_data": "",
-            "is_final": True
-        })
-        
-        print(f"✅ Audio file streamed in {chunk_number} chunks")
+        return {
+            "status": "pipeline_completed",
+            "pipeline_id": pipeline_id,
+            "result": result
+        }
         
     except Exception as e:
-        print(f"❌ Error streaming audio file via WebSocket: {e}")
-
-async def send_error_via_websocket(tenant_id: str, user_id: str, query_id: str, error: str):
-    """Send error message via WebSocket"""
-    try:
-        from backend.main import manager
-        
-        await manager.send_json_to_user(tenant_id, user_id, {
-            "type": "error",
-            "query_id": query_id,
-            "error": error,
-            "timestamp": datetime.utcnow().isoformat()
-        })
-    except Exception as e:
-        print(f"❌ Error sending error via WebSocket: {e}")
-
-
+        print(f"❌ [LEGACY-PIPELINE] Error: {e}")
+        return {
+            "status": "error",
+            "pipeline_id": pipeline_id,
+            "error": str(e)
+        }

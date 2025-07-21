@@ -102,8 +102,13 @@ class VoicebotSTTClient:
                     "type": "audio_stream",
                     "audio": audio_b64,
                     "buffer_size": 32000,
-                    "overlap_size": 8000
+                    "overlap_size": 8000,
+                    "conversation_mode": True,  # Add this line
+                    "tts_language": "en",       # Add this line
+                    "voice": "en-US-JennyNeural",  # Add this line
+                    "auto_respond": True        # Add this line
                 }
+
                 
                 await self.websocket.send(json.dumps(message))
                 
@@ -116,7 +121,11 @@ class VoicebotSTTClient:
             
             # Send end of stream
             end_message = {
-                "type": "audio_stream_end"
+                "type": "audio_stream_end",
+                "conversation_mode": True,  # Add this line
+                "tts_language": "en",       # Add this line
+                "voice": "en-US-JennyNeural",  # Add this line
+                "auto_respond": True        # Add this line
             }
             await self.websocket.send(json.dumps(end_message))
             print("✅ Audio file sent for transcription")
@@ -159,7 +168,11 @@ class VoicebotSTTClient:
                     "type": "audio_stream",
                     "audio": audio_b64,
                     "buffer_size": 32000,
-                    "overlap_size": 8000
+                    "overlap_size": 8000,
+                    "conversation_mode": True,  # Add this line
+                    "tts_language": "en",       # Add this line
+                    "voice": "en-US-JennyNeural",  # Add this line
+                    "auto_respond": True        # Add this line
                 }
                 await self.websocket.send(json.dumps(message))
                 
@@ -172,7 +185,11 @@ class VoicebotSTTClient:
             
             # Send end of stream
             end_message = {
-                "type": "audio_stream_end"
+                "type": "audio_stream_end",
+                "conversation_mode": True,  # Add this line
+                "tts_language": "en",       # Add this line
+                "voice": "en-US-JennyNeural",  # Add this line
+                "auto_respond": True        # Add this line
             }
             await self.websocket.send(json.dumps(end_message))
             print("✅ Audio sent for transcription")
@@ -264,7 +281,11 @@ class VoicebotSTTClient:
                         "type": "audio_stream",
                         "audio": audio_b64,
                         "buffer_size": 32000,
-                        "overlap_size": 8000
+                        "overlap_size": 8000,
+                        "conversation_mode": True,  # Add this line
+                        "tts_language": "en",       # Add this line
+                        "voice": "en-US-JennyNeural",  # Add this line
+                        "auto_respond": True        # Add this line
                     }
                     await self.websocket.send(json.dumps(message))
                     remaining_chunks += 1
@@ -275,7 +296,11 @@ class VoicebotSTTClient:
             
             # Send end of stream
             end_message = {
-                "type": "audio_stream_end"
+                "type": "audio_stream_end",
+                "conversation_mode": True,  # Add this line
+                "tts_language": "en",       # Add this line
+                "voice": "en-US-JennyNeural",  # Add this line
+                "auto_respond": True        # Add this line
             }
             await self.websocket.send(json.dumps(end_message))
             
@@ -285,6 +310,71 @@ class VoicebotSTTClient:
             print(f"❌ Error in streaming recording: {e}")
         finally:
             self.stop_recording.set()
+    
+    async def record_and_send_audio_conversation(self, duration=5):
+        """Record audio from microphone with full conversation mode (STT + RAG + TTS)"""
+        if not self.websocket:
+            print("❌ Not connected to WebSocket")
+            return
+        
+        try:
+            print(f"🎤 Recording audio for conversation mode ({duration} seconds)...")
+            print("🗣️ This will trigger: STT → RAG → TTS pipeline")
+            
+            # Record audio
+            recording = sd.rec(
+                int(duration * self.rate),
+                samplerate=self.rate,
+                channels=self.channels,
+                dtype='int16'
+            )
+            
+            # Wait for recording to complete
+            sd.wait()
+            
+            print("🔄 Recording complete, sending for full conversation processing...")
+            
+            # Send audio in chunks with conversation mode enabled
+            chunk_size = 4096
+            total_chunks = len(recording) // chunk_size + (1 if len(recording) % chunk_size > 0 else 0)
+            
+            for i in range(0, len(recording), chunk_size):
+                chunk = recording[i:i + chunk_size]
+                
+                # Send audio chunk with conversation mode
+                audio_b64 = base64.b64encode(chunk.tobytes()).decode('utf-8')
+                message = {
+                    "type": "audio_stream",
+                    "audio": audio_b64,
+                    "buffer_size": 32000,
+                    "overlap_size": 8000,
+                    "conversation_mode": True,      # Enable full pipeline
+                    "tts_language": "en",
+                    "voice": "en-US-JennyNeural",
+                    "auto_respond": True
+                }
+                await self.websocket.send(json.dumps(message))
+                
+                # Show progress
+                chunk_num = i // chunk_size + 1
+                if chunk_num % 10 == 0 or chunk_num == total_chunks:
+                    print(f"📊 Sending chunk {chunk_num}/{total_chunks}")
+                
+                await asyncio.sleep(0.01)  # Small delay
+        
+            # Send end of stream with conversation mode
+            end_message = {
+                "type": "audio_stream_end",
+                "conversation_mode": True,
+                "tts_language": "en",
+                "voice": "en-US-JennyNeural", 
+                "auto_respond": True
+            }
+            await self.websocket.send(json.dumps(end_message))
+            print("✅ Audio sent for full conversation processing (STT+RAG+TTS)")
+            
+        except Exception as e:
+            print(f"❌ Error recording audio: {e}")
     
     async def listen_for_responses(self):
         """Listen for responses from the WebSocket"""
@@ -426,15 +516,16 @@ async def main():
         
         print("\n🎯 STT Test Options:")
         print("1. Test with audio file")
-        print("2. Record from microphone (batch)")
-        print("3. Record from microphone (streaming)")
-        print("4. Test query with TTS")
-        print("5. Send ping")
-        print("6. Exit")
+        print("2. Record from microphone (transcription only)")
+        print("3. Record from microphone (streaming transcription only)")
+        print("4. Record from microphone (FULL CONVERSATION - STT+RAG+TTS)")  # Update this
+        print("5. Test query with TTS")
+        print("6. Send ping")
+        print("7. Exit")  # Update numbering
         
         while True:
             try:
-                choice = input("\nEnter your choice (1-6): ").strip()
+                choice = input("\nEnter your choice (1-7): ").strip()
                 
                 if choice == "1":
                     file_path = input("Enter audio file path (or press Enter for 'sample.wav'): ").strip()
@@ -465,18 +556,23 @@ async def main():
                         await client.record_and_send_audio_streaming(10)
                 
                 elif choice == "4":
+                    duration = input("Recording duration in seconds (default 5): ").strip()
+                    duration = int(duration) if duration.isdigit() else 5
+                    await client.record_and_send_audio_conversation(duration)
+                
+                elif choice == "5":
                     query = input("Enter your query: ").strip()
                     if query:
                         await client.test_query_with_tts(query)
                     else:
                         print("❌ Query cannot be empty")
                 
-                elif choice == "5":
+                elif choice == "6":
                     await client.send_ping()
                     # Give a moment for the pong to be received and displayed
                     await asyncio.sleep(0.5)
                 
-                elif choice == "6":
+                elif choice == "7":
                     print("👋 Exiting...")
                     break
                 

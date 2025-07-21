@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
 from sqlalchemy.orm import Session
 from backend.db.connection import SessionLocal
 from backend.auth.jwt_ import get_current_user, UserTokenData
 from pydantic import BaseModel
 from typing import Optional
-from backend.workers.tasks import process_query_task, process_query_with_tts_task
+from backend.workers.tasks import process_query_task, process_query_with_tts_task, audio_to_audio_pipeline
 from backend.workers.celery_worker import celery_app
 from celery.result import AsyncResult
 from uuid import uuid4

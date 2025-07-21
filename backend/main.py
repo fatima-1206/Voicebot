@@ -121,6 +121,68 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
             
             if data.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
+            
+            elif data.get("type") == "continuous_audio_stream":
+                # New handler for continuous audio with server-side VAD
+                from uuid import uuid4
+                audio_chunk_base64 = data.get("audio", None)
+                
+                if audio_chunk_base64:
+                    key = f"{tenant_id}_{user_id}"
+                    
+                    try:
+                        audio_bytes = base64.b64decode(audio_chunk_base64)
+                        user_audio_buffers[key] += audio_bytes
+                        user_last_activity[key] = time.time()
+                        
+                        # Only process if we have enough new audio data
+                        min_process_size = 16000  # 1 second at 16kHz
+                        if len(user_audio_buffers[key]) >= min_process_size:
+                            
+                            # Send ONLY the new chunk for VAD processing, not the entire buffer
+                            from backend.workers.tasks import process_continuous_audio_chunk
+                            process_continuous_audio_chunk.delay(
+                                audio_bytes=audio_bytes,  # Only the new chunk
+                                user_id=user_id,
+                                tenant_id=tenant_id,
+                                buffer_key=key,
+                                tts_language=data.get("tts_language", "en"),
+                                voice=data.get("voice", "en-US-JennyNeural"),
+                                auto_respond=data.get("auto_respond", True)
+                            )
+                            
+                            # Clear the buffer after processing to prevent reprocessing
+                            user_audio_buffers[key] = bytearray()
+                    
+                    except Exception as e:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": f"Error processing continuous audio: {str(e)}"
+                        })
+
+            elif data.get("type") == "start_continuous_conversation":
+                # Initialize continuous conversation mode
+                key = f"{tenant_id}_{user_id}"
+                user_audio_buffers[key] = bytearray()  # Reset buffer
+                user_last_activity[key] = time.time()
+                
+                await websocket.send_json({
+                    "type": "continuous_conversation_started",
+                    "message": "Ready for continuous conversation"
+                })
+
+            elif data.get("type") == "stop_continuous_conversation":
+                # Stop continuous conversation mode
+                key = f"{tenant_id}_{user_id}"
+                if key in user_audio_buffers:
+                    del user_audio_buffers[key]
+                if key in user_last_activity:
+                    del user_last_activity[key]
+                
+                await websocket.send_json({
+                    "type": "continuous_conversation_stopped",
+                    "message": "Continuous conversation stopped"
+                })
             elif data.get("type") == "query":
                 # Handle regular query submission via WebSocket
                 from backend.workers.tasks import process_query_task
@@ -203,8 +265,14 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                         user_last_activity[key] = time.time()
 
                         # Rolling buffer configuration
-                        buffer_size = data.get("buffer_size", 32000)
-                        overlap_size = data.get("overlap_size", 8000)
+                        if conversation_mode:
+                            # Use smaller buffers for more responsive conversation
+                            buffer_size = data.get("buffer_size", 16000)  # Reduced from 32000
+                            overlap_size = data.get("overlap_size", 4000)  # Reduced from 8000
+                        else:
+                            # Use larger buffers for batch processing
+                            buffer_size = data.get("buffer_size", 32000)
+                            overlap_size = data.get("overlap_size", 8000)
                         
                         if len(user_audio_buffers[key]) >= buffer_size:
                             transcription_id = str(uuid4())

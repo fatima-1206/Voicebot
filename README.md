@@ -6,29 +6,29 @@ To run the app, use the following command:
 ./start.sh
 ```
 
-for dev mode:
+For dev mode:
 
 ```bash
 ./start.sh --dev
 ```
 
-it will run on
+It will run on:
 ```bash
 http://127.0.0.1:8000/
 ```
 
-you can view the api with swagger ui on 
+You can view the API with Swagger UI at:
 ```bash
 http://127.0.0.1:8000/docs
 ```
 
-to setup the environment on Linux run:
+To set up the environment on Linux, run:
 
 ```bash
 python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
 ```
 
-to setup the environment on Windows run:
+To set up the environment on Windows, run:
 
 ```bash
 python -m venv venv
@@ -36,6 +36,23 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-To use the api points with the locks in front of them, you must get authenticated first.
+### Testing the API
+To use the API endpoints with the locks in front of them, you must get authenticated first.
 
-To get authenticated use the login endpoint to get an access token. Copy the token and scroll to the top of the swagger ui page. Click on the button labled `Authorize` and past the token in the Value field. Now after closing it, you should be able to use all api endpoints.
+To get authenticated, use the login endpoint to get an access token. Copy the token and scroll to the top of the Swagger UI page. Click on the button labeled `Authorize` and paste the token in the Value field. After closing it, you should be able to use all API endpoints.
+
+
+### Audio to Audio Pipeline
+Since the audio streaming is done through WebSockets instead of HTTPS, it cannot be tested through the API.
+
+For this purpose, I have made a `test_client.py` file to mimic the frontend for testing purposes.
+
+To use the client, start the app using the start.sh as stated above and then run the client by running the command:
+
+```python test_client.py```
+
+The text query response will be printed on the terminal and the audio output will be saved in the folder `backend/rag/temp_audioFiles` with a name like `tts_{timestamp}_{task_id}.wav`.
+
+**Note**: If the program does not stop after pressing Ctrl+C, open a new terminal in the same directory and run the following command:
+
+```./stop.sh```

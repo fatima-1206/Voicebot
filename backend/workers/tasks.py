@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from typing import List, Dict, Any
 import gc
 import asyncio
+import io
+import wave
 from faster_whisper import WhisperModel
 import tempfile
 model = WhisperModel("medium", device="cuda", compute_type="float16")
@@ -26,7 +28,15 @@ vad_model = load_silero_vad()
 sample_rate = 16000  # Assuming 16kHz audio
 
 # Add Redis connection for WebSocket messaging
-redis_client = redis.Redis(host='localhost', port=6379, db=2, decode_responses=True)
+# Add error handling for Redis operations
+try:
+    redis_client = redis.Redis(host='localhost', port=6379, db=2, decode_responses=True)
+    # Test the connection
+    redis_client.ping()
+    print("✅ Redis connection successful")
+except Exception as e:
+    print(f"❌ Redis connection failed: {e}")
+    # You might want to use a fallback or exit
 
 
 # Add connection pooling and memory management
@@ -276,55 +286,27 @@ def bytes_to_numpy_audio(audio_bytes: bytes) -> np.ndarray:
     Convert audio bytes to numpy array - handles multiple formats
     """
     try:
-        import numpy as np
-        import io
-        import wave
-        
         # Try to parse as WAV first
         try:
-            with io.BytesIO(audio_bytes) as wav_io:
-                with wave.open(wav_io, 'rb') as wav_file:
-                    frames = wav_file.getnframes()
-                    sample_rate = wav_file.getframerate()
-                    sample_width = wav_file.getsampwidth()
-                    channels = wav_file.getnchannels()
-                    
-                    audio_data = wav_file.readframes(frames)
-                    
-                    # Convert to numpy array
-                    if sample_width == 1:
-                        audio_array = np.frombuffer(audio_data, dtype=np.uint8)
-                        audio_array = (audio_array.astype(np.float32) - 128) / 128.0
-                    elif sample_width == 2:
-                        audio_array = np.frombuffer(audio_data, dtype=np.int16)
-                        audio_array = audio_array.astype(np.float32) / 32768.0
-                    elif sample_width == 4:
-                        audio_array = np.frombuffer(audio_data, dtype=np.int32)
-                        audio_array = audio_array.astype(np.float32) / 2147483648.0
-                    else:
-                        raise ValueError(f"Unsupported sample width: {sample_width}")
-                    
-                    # Convert to mono if stereo
-                    if channels == 2:
-                        audio_array = audio_array.reshape(-1, 2).mean(axis=1)
-                    
-                    return audio_array
-                    
+            with io.BytesIO(audio_bytes) as audio_io:
+                with wave.open(audio_io, 'rb') as wav_file:
+                    frames = wav_file.readframes(-1)
+                    audio_data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32767.0
+                    return audio_data
         except Exception:
             pass
         
         # Fallback: assume raw 16-bit PCM
         try:
-            audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
-            audio_array = audio_array.astype(np.float32) / 32768.0
-            return audio_array
+            audio_data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+            return audio_data
         except Exception:
             pass
             
         # Last resort: try as float32
         try:
-            audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
-            return audio_array
+            audio_data = np.frombuffer(audio_bytes, dtype=np.float32)
+            return audio_data
         except Exception:
             pass
             
@@ -854,3 +836,227 @@ def audio_to_audio_pipeline(pipeline_id: str, audio_bytes: bytes, tenant_id: str
             "pipeline_id": pipeline_id,
             "error": str(e)
         }
+
+@celery_app.task(name='streaming_transcribe', bind=True)
+def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: str, 
+                            tenant_id: str = None, is_final: bool = False):
+    """
+    Streaming transcription - provides intermediate results
+    """
+    try:
+        audio_data = bytes_to_numpy_audio(audio_bytes)
+        
+        # Use Whisper with streaming mode
+        segments, info = model.transcribe(
+            audio_data,
+            beam_size=1,  # Faster decoding
+            language="en",
+            condition_on_previous_text=False,  # More responsive
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=300)  # Quick silence detection
+        )
+        
+        transcript_parts = []
+        for segment in segments:
+            transcript_parts.append(segment.text.strip())
+        
+        transcript = " ".join(transcript_parts).strip()
+        
+        # Send partial result immediately
+        start_time = time.time()
+        result = {
+            "type": "transcription_result",
+            "status": "success",
+            "transcript": transcript,
+            "chunk_id": chunk_id,
+            "user_id": user_id,
+            "is_partial": not is_final,
+            "confidence": getattr(info, 'confidence', 0.0),
+            "processing_time": time.time() - start_time
+        }
+        
+        # Send via Redis for immediate WebSocket delivery
+        redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(result))
+        
+        # If final and should respond, trigger response generation
+        if is_final and should_respond_to_transcript(transcript):
+            process_query_with_tts_task.delay(
+                query_id=str(uuid4()),
+                tts_task_id=str(uuid4()),
+                query=transcript,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                language="en",
+                voice="en-US-JennyNeural",
+                stream_audio=True
+            )
+        
+        return result
+        
+    except Exception as e:
+        # Handle error
+        pass
+
+@celery_app.task(name='process_continuous_audio', bind=True)
+def process_continuous_audio_task(self, audio_bytes: bytes, user_id: str, tenant_id: str, 
+                                 buffer_key: str, tts_language: str = "en", 
+                                 voice: str = "en-US-JennyNeural", auto_respond: bool = True):
+    """
+    Process continuous audio stream with server-side VAD
+    Detects speech segments and triggers STT+RAG+TTS pipeline
+    """
+    print(f"🔄 [CONTINUOUS] Processing audio buffer for user {user_id}")
+    
+    try:
+        import numpy as np
+        import torch
+        from silero_vad import get_speech_timestamps, collect_chunks
+        
+        # Convert bytes to numpy array
+        audio_data = bytes_to_numpy_audio(audio_bytes)
+        if audio_data is None or len(audio_data) == 0:
+            return {"status": "no_audio"}
+        
+        # Convert to tensor for VAD
+        audio_tensor = torch.from_numpy(audio_data).float()
+        audio_tensor = torch.clamp(audio_tensor, -1.0, 1.0)
+        
+        # Apply VAD to detect speech segments
+        speech_timestamps = get_speech_timestamps(
+            audio_tensor, 
+            vad_model, 
+            sampling_rate=sample_rate,
+            threshold=0.2,
+            min_speech_duration_ms=200,  # Minimum 0.5s speech
+            min_silence_duration_ms=100,  # 0.3s silence to separate utterances
+            speech_pad_ms=50  # Add padding around speech
+        )
+        
+        print(f"   🔍 Found {len(speech_timestamps)} speech segments")
+        
+        if not speech_timestamps:
+            return {"status": "no_speech"}
+        
+        # Process each speech segment
+        processed_segments = []
+        for i, speech_segment in enumerate(speech_timestamps):
+            start_sample = speech_segment['start']
+            end_sample = speech_segment['end']
+            
+            # Extract speech segment
+            speech_audio = audio_tensor[start_sample:end_sample]
+            
+            # Skip very short segments
+            duration = len(speech_audio) / sample_rate
+            if duration < 0.5:
+                continue
+            
+            print(f"   🗣️ Processing speech segment {i+1}: {duration:.1f}s")
+            
+            # Convert back to bytes for STT
+            speech_bytes = (speech_audio.numpy() * 32767).astype(np.int16).tobytes()
+            
+            # Create unique chunk ID for this segment
+            chunk_id = f"{user_id}_{int(time.time() * 1000)}_{i}"
+            
+            # Process this speech segment immediately
+            segment_result = process_speech_segment(
+                speech_bytes, user_id, chunk_id, tenant_id,
+                tts_language, voice, auto_respond
+            )
+            
+            processed_segments.append(segment_result)
+        
+        return {
+            "status": "success",
+            "segments_processed": len(processed_segments),
+            "results": processed_segments
+        }
+        
+    except Exception as e:
+        print(f"❌ [CONTINUOUS] Error: {e}")
+        return {"status": "error", "error": str(e)}
+
+def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str, 
+                         tenant_id: str, tts_language: str, voice: str, auto_respond: bool):
+    """
+    Process a single detected speech segment through STT+RAG+TTS
+    """
+    try:
+        print(f"🎯 [SPEECH] Processing segment {chunk_id}")
+        
+        # Step 1: STT
+        audio_data = bytes_to_numpy_audio(speech_bytes)
+        segments, info = model.transcribe(
+            audio_data,
+            beam_size=1,
+            language="en",
+            condition_on_previous_text=False,
+            vad_filter=False,  # We already did VAD
+            initial_prompt=None
+        )
+        
+        # Extract transcript
+        transcript_parts = []
+        for segment in segments:
+            transcript_parts.append(segment.text.strip())
+        
+        transcript = " ".join(transcript_parts).strip()
+        
+        if not transcript:
+            print(f"   ❌ No transcript generated")
+            return {"status": "no_transcript", "chunk_id": chunk_id}
+        
+        print(f"   📝 Transcript: '{transcript}'")
+        
+        # Send STT result immediately
+        stt_result = {
+            "type": "speech_detected",
+            "transcript": transcript,
+            "chunk_id": chunk_id,
+            "user_id": user_id,
+            "confidence": getattr(info, 'confidence', 0.0),
+            "duration": len(audio_data) / sample_rate
+        }
+        
+        # Send via Redis for immediate WebSocket delivery
+        redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(stt_result))
+        
+        # Step 2: Check if we should respond
+        if auto_respond and should_respond_to_transcript(transcript):
+            print(f"   🤖 Triggering response for: '{transcript}'")
+            
+            # Generate response immediately (don't delay this)
+            response_id = str(uuid4())
+            tts_task_id = str(uuid4())
+            
+            # Trigger RAG + TTS response
+            process_query_with_tts_task.delay(
+                query_id=response_id,
+                tts_task_id=tts_task_id,
+                query=transcript,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                language=tts_language,
+                voice=voice,
+                stream_audio=True,
+                max_tokens=300,  # Shorter responses for conversation
+                temperature=0.7
+            )
+            
+            return {
+                "status": "responded",
+                "transcript": transcript,
+                "response_id": response_id,
+                "chunk_id": chunk_id
+            }
+        else:
+            return {
+                "status": "transcribed_only", 
+                "transcript": transcript,
+                "chunk_id": chunk_id
+            }
+            
+    except Exception as e:
+        print(f"❌ [SPEECH] Error processing segment: {e}")
+        return {"status": "error", "chunk_id": chunk_id, "error": str(e)}

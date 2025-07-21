@@ -69,12 +69,19 @@ async def redis_listener():
                         tenant_id = parts[1]
                         user_id = parts[2]
                         
-                        # Parse message data
-                        data = json.loads(message['data'])
+                        # Check if user is still connected before processing
+                        if manager.is_connected(tenant_id, user_id):
+                            # Parse message data
+                            data = json.loads(message['data'])
+                            
+                            # Forward to WebSocket client
+                            await manager.send_json_to_user(tenant_id, user_id, data)
+                        else:
+                            # User is no longer connected, skip message
+                            pass
                         
-                        # Forward to WebSocket client
-                        await manager.send_json_to_user(tenant_id, user_id, data)
-                        
+                except json.JSONDecodeError as e:
+                    print(f"❌ Invalid JSON in Redis message: {e}")
                 except Exception as e:
                     print(f"❌ Error processing Redis message: {e}")
             
@@ -82,8 +89,14 @@ async def redis_listener():
             
     except Exception as e:
         print(f"❌ Redis listener error: {e}")
+        # Restart the listener after a delay
+        await asyncio.sleep(5)
+        asyncio.create_task(redis_listener())
     finally:
-        pubsub.close()
+        try:
+            pubsub.close()
+        except Exception:
+            pass
 
 # Combined startup event handler
 @app.on_event("startup")
@@ -177,8 +190,10 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                         "message": "Empty query received"
                     })
             elif data.get("type") == "audio_stream":
-                from uuid import uuid4  # Add this import
+                from uuid import uuid4
                 audio_chunk_base64 = data.get("audio", None)
+                conversation_mode = data.get("conversation_mode", False)  # New parameter
+                
                 if audio_chunk_base64:
                     key = f"{tenant_id}_{user_id}"
                     
@@ -188,29 +203,43 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                         user_last_activity[key] = time.time()
 
                         # Rolling buffer configuration
-                        buffer_size = data.get("buffer_size", 32000)  # 32KB chunks
-                        overlap_size = data.get("overlap_size", 8000)  # 8KB overlap
+                        buffer_size = data.get("buffer_size", 32000)
+                        overlap_size = data.get("overlap_size", 8000)
                         
                         if len(user_audio_buffers[key]) >= buffer_size:
-                            # Process current buffer
                             transcription_id = str(uuid4())
                             
-                            # Pass tenant_id so results can be sent back via WebSocket
-                            transcribe_chunk.delay(
-                                audio_bytes=bytes(user_audio_buffers[key]),
-                                user_id=user_id,
-                                chunk_id=transcription_id,
-                                tenant_id=tenant_id  # Add this parameter
-                            )
+                            # Choose task based on conversation mode
+                            if conversation_mode:
+                                # Use the new real-time conversation task
+                                from backend.workers.tasks import transcribe_and_respond_task
+                                transcribe_and_respond_task.delay(
+                                    audio_bytes=bytes(user_audio_buffers[key]),
+                                    user_id=user_id,
+                                    chunk_id=transcription_id,
+                                    tenant_id=tenant_id,
+                                    conversation_mode=True,
+                                    tts_language=data.get("tts_language", "en"),
+                                    voice=data.get("voice", ""),
+                                    auto_respond=data.get("auto_respond", True)
+                                )
+                            else:
+                                # Use regular transcription only
+                                transcribe_chunk.delay(
+                                    audio_bytes=bytes(user_audio_buffers[key]),
+                                    user_id=user_id,
+                                    chunk_id=transcription_id,
+                                    tenant_id=tenant_id
+                                )
 
-                            # Rolling buffer: keep overlap_size bytes for next chunk
+                            # Rolling buffer: keep overlap for next chunk
                             user_audio_buffers[key] = user_audio_buffers[key][-overlap_size:]
 
                             await websocket.send_json({
                                 "type": "transcription_submitted",
                                 "transcription_id": transcription_id,
                                 "buffer_size": len(user_audio_buffers[key]),
-                                "overlap_size": overlap_size
+                                "conversation_mode": conversation_mode
                             })
                             
                     except Exception as e:
@@ -220,20 +249,35 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                         })
 
             elif data.get("type") == "audio_stream_end":
-                from uuid import uuid4  # Add this import
-                # Handle end of audio stream - process remaining buffer
+                from uuid import uuid4
                 key = f"{tenant_id}_{user_id}"
+                conversation_mode = data.get("conversation_mode", False)
+                
                 if key in user_audio_buffers and len(user_audio_buffers[key]) > 0:
                     try:
                         transcription_id = str(uuid4())
-                        transcribe_chunk.delay(
-                            audio_bytes=bytes(user_audio_buffers[key]),
-                            user_id=user_id,
-                            chunk_id=transcription_id,
-                            tenant_id=tenant_id  # Add this parameter
-                        )
+                        
+                        if conversation_mode:
+                            from backend.workers.tasks import transcribe_and_respond_task
+                            transcribe_and_respond_task.delay(
+                                audio_bytes=bytes(user_audio_buffers[key]),
+                                user_id=user_id,
+                                chunk_id=transcription_id,
+                                tenant_id=tenant_id,
+                                conversation_mode=True,
+                                tts_language=data.get("tts_language", "en"),
+                                voice=data.get("voice", ""),
+                                auto_respond=data.get("auto_respond", True)
+                            )
+                        else:
+                            transcribe_chunk.delay(
+                                audio_bytes=bytes(user_audio_buffers[key]),
+                                user_id=user_id,
+                                chunk_id=transcription_id,
+                                tenant_id=tenant_id
+                            )
 
-                        # Clean up buffer completely at end
+                        # Clean up buffer
                         user_audio_buffers[key] = bytearray()
                         if key in user_last_activity:
                             del user_last_activity[key]
@@ -241,7 +285,8 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                         await websocket.send_json({
                             "type": "transcription_submitted",
                             "transcription_id": transcription_id,
-                            "final": True
+                            "final": True,
+                            "conversation_mode": conversation_mode
                         })
                     except Exception as e:
                         await websocket.send_json({

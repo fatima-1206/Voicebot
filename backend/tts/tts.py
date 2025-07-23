@@ -6,8 +6,9 @@ from typing import Optional, Union
 import soundfile as sf
 import sounddevice as sd
 from groq import Groq
+from gtts import gTTS
+import io
 
-# TODO: Add a fallback in case the limit of play tts is reached
 
 # Ensure output directory exists
 os.makedirs("backend/rag/temp_audioFiles", exist_ok=True)
@@ -15,8 +16,60 @@ os.makedirs("backend/rag/temp_audioFiles", exist_ok=True)
 # Initialize Groq client
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
+def synthesize_text_gtts(text, language="en", output_file="backend/rag/temp_audioFiles/output.wav"):
+    """Fallback function to synthesize text to speech using Google TTS (gTTS)"""
+    try:
+        # Map language codes for gTTS
+        gtts_language_map = {
+            "ur": "ur",  # Urdu
+            "en": "en",  # English
+            "es": "es",  # Spanish
+            "fr": "fr",  # French
+            "de": "de",  # German
+            "it": "it",  # Italian
+            "pt": "pt",  # Portuguese
+            "ru": "ru",  # Russian
+            "ja": "ja",  # Japanese
+            "ko": "ko",  # Korean
+            "zh": "zh",  # Chinese
+            "ar": "ar",  # Arabic
+            "hi": "hi",  # Hindi
+        }
+        
+        # Use mapped language or default to English
+        gtts_lang = gtts_language_map.get(language, "en")
+        
+        # Create gTTS object
+        tts_obj = gTTS(text=text, lang=gtts_lang, slow=False)
+        
+        # Save to temporary file first (gTTS saves as MP3)
+        temp_mp3_file = output_file.replace('.wav', '_temp.mp3')
+        tts_obj.save(temp_mp3_file)
+        
+        # Convert MP3 to WAV using soundfile
+        try:
+            import subprocess
+            # Use ffmpeg to convert MP3 to WAV
+            subprocess.run([
+                'ffmpeg', '-i', temp_mp3_file, '-y', output_file
+            ], check=True, capture_output=True)
+            
+            # Clean up temporary MP3 file
+            os.remove(temp_mp3_file)
+            
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            # If ffmpeg is not available, rename MP3 to WAV (will still work for most players)
+            os.rename(temp_mp3_file, output_file)
+            print("Warning: ffmpeg not available, saved as MP3 with .wav extension")
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error in gTTS synthesis: {e}")
+        return False
+
 def synthesize_text_groq(text, voice="Fritz-PlayAI", output_file="backend/rag/temp_audioFiles/output.wav"):
-    """Synchronous function to synthesize text to speech using Groq API"""
+    """Primary function to synthesize text to speech using Groq API"""
     try:
         response = groq_client.audio.speech.create(
             model="playai-tts",
@@ -31,14 +84,42 @@ def synthesize_text_groq(text, voice="Fritz-PlayAI", output_file="backend/rag/te
         print(f"Error in Groq TTS synthesis: {e}")
         return False
 
-async def synthesize_text(text, voice="Fritz-PlayAI", output_file="backend/rag/temp_audioFiles/output.wav"):
-    """Async wrapper for Groq TTS synthesis"""
-    # Run the synchronous Groq call in a thread pool
+def synthesize_text_with_fallback(text, language="en", voice="Fritz-PlayAI", output_file="backend/rag/temp_audioFiles/output.wav"):
+    """
+    Synthesize text to speech with Groq as primary and gTTS as fallback.
+    
+    Args:
+        text (str): Text to synthesize
+        language (str): Language code (used for gTTS fallback)
+        voice (str): Voice for Groq TTS
+        output_file (str): Output file path
+        
+    Returns:
+        tuple: (success: bool, method_used: str)
+    """
+    # Try Groq first
+    print("Attempting TTS with Groq...")
+    if synthesize_text_groq(text, voice, output_file):
+        print("✅ Groq TTS synthesis successful")
+        return True, "groq"
+    
+    # Fallback to gTTS
+    print("⚠️ Groq TTS failed, falling back to gTTS...")
+    if synthesize_text_gtts(text, language, output_file):
+        print("✅ gTTS synthesis successful")
+        return True, "gtts"
+    
+    # Both failed
+    print("❌ Both Groq and gTTS synthesis failed")
+    return False, "none"
+
+async def synthesize_text(text, voice="Fritz-PlayAI", language="en", output_file="backend/rag/temp_audioFiles/output.wav"):
+    """Async wrapper for TTS synthesis with fallback"""
     import asyncio
     loop = asyncio.get_event_loop()
     
     def sync_synthesize():
-        return synthesize_text_groq(text, voice, output_file)
+        return synthesize_text_with_fallback(text, language, voice, output_file)
     
     return await loop.run_in_executor(None, sync_synthesize)
 
@@ -68,7 +149,7 @@ def get_groq_voice_for_language(language: str) -> str:
 
 def tts(text: str, language: str, voice: str = "", output_filename: str = None, play_audio_flag: bool = True) -> str:
     """
-    Synchronous Text-to-Speech function to convert text to audio using Groq.
+    Synchronous Text-to-Speech function to convert text to audio using Groq with gTTS fallback.
     
     Args:
         text (str): The text to convert to speech.
@@ -96,11 +177,13 @@ def tts(text: str, language: str, voice: str = "", output_filename: str = None, 
     
     output_file = f"backend/rag/temp_audioFiles/{output_filename}"
     
-    # Generate audio using Groq
-    success = synthesize_text_groq(text, voice, output_file)
+    # Generate audio using Groq with gTTS fallback
+    success, method_used = synthesize_text_with_fallback(text, language, voice, output_file)
     
     if not success:
-        raise Exception("Failed to generate audio using Groq TTS")
+        raise Exception("Failed to generate audio using both Groq TTS and gTTS fallback")
+    
+    print(f"✅ TTS completed using {method_used.upper()}")
     
     # Play audio if requested
     if play_audio_flag:
@@ -171,10 +254,10 @@ def get_tts_task_status(task_id: str) -> dict:
         }
 
 def test_tts():
-    """Test function for TTS functionality"""
+    """Test function for TTS functionality with fallback"""
     urdu_text = "Hello, how are you? How can I help you today?"
     
-    print("Testing synchronous Groq TTS...")
+    print("Testing synchronous TTS with fallback...")
     output_file = tts(urdu_text, language="ur", voice="Fritz-PlayAI")
     print(f"Synchronous TTS completed: {output_file}")
     

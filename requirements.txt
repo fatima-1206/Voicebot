@@ -64,3 +64,4 @@ celery[redis]
 tiktoken
 groq
 better-profanity
+gtts

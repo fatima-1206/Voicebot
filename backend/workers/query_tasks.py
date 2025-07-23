@@ -8,7 +8,7 @@ from backend.workers.utilities import (
 from backend.workers.tts_tasks import generate_and_stream_tts, generate_tts_file
 from backend.response_generation.generator import generate_response
 
-
+# TODO: Add a fall back to no rag, only simple rag if the user passes a param 
 @celery_app.task(name='process_query', bind=True)
 def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id: str, 
                     max_tokens: int = 500, temperature: float = 0.7, session_id: str = None):

@@ -15,6 +15,7 @@ from datetime import datetime
 from uuid import uuid4
 from silero_vad import get_speech_timestamps, collect_chunks
 
+# TODO: add a profanity filter on the stt
 
 def bytes_to_numpy_audio(audio_bytes: bytes) -> np.ndarray:
     """Convert audio bytes to numpy array - handles multiple formats"""

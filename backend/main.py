@@ -140,9 +140,9 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                         if len(user_audio_buffers[key]) >= min_process_size:
                             
                             # Send ONLY the new chunk for VAD processing, not the entire buffer
-                            from backend.workers.tasks import process_continuous_audio_chunk
-                            process_continuous_audio_chunk.delay(
-                                audio_bytes=audio_bytes,  # Only the new chunk
+                            from backend.workers.stt_tasks import process_continuous_audio_task
+                            process_continuous_audio_task.delay(
+                                audio_bytes=bytes(user_audio_buffers[key]),  # Send the buffer
                                 user_id=user_id,
                                 tenant_id=tenant_id,
                                 buffer_key=key,

@@ -27,12 +27,13 @@ class QueryRequest(BaseModel):
     max_tokens: Optional[int] = config.get("max_input_tokens", 100)
     temperature: Optional[float] = config.get("temperature", 0.7)
     session_id: Optional[str] = None
+    use_rag: Optional[bool] = True  # Enable RAG by default
+    fallback_on_error: Optional[bool] = True  # Enable fallback by default
 
 class QuerySubmissionResponse(BaseModel):
     query_id: str
     status: str
     message: str
-
 
 class QueryWithTTSRequest(BaseModel):
     query: str
@@ -42,6 +43,8 @@ class QueryWithTTSRequest(BaseModel):
     language: str = "en"  # Language for TTS
     voice: Optional[str] = ""  # Optional specific voice
     stream_audio: bool = True  # Whether to stream audio via WebSocket
+    use_rag: Optional[bool] = True  # Enable RAG by default
+    fallback_on_error: Optional[bool] = True  # Enable fallback by default
 
 class QueryWithTTSResponse(BaseModel):
     query_id: str
@@ -55,7 +58,7 @@ async def submit_query(
     db: Session = Depends(get_db),
     current_user: UserTokenData = Depends(get_current_user)
 ):
-    """Submit a query for asynchronous processing"""
+    """Submit a query for asynchronous processing with optional RAG fallback"""
     try:
         query_id = str(uuid4())
         
@@ -67,18 +70,28 @@ async def submit_query(
             user_id=str(current_user.user_id),
             max_tokens=request.max_tokens,
             temperature=request.temperature,
-            session_id=request.session_id
+            session_id=request.session_id,
+            use_rag=request.use_rag,
+            fallback_on_error=request.fallback_on_error
         )
+        
+        # Create message based on RAG settings
+        if request.use_rag:
+            if request.fallback_on_error:
+                message = "Query submitted for RAG processing with LLM fallback. Response will be sent via WebSocket."
+            else:
+                message = "Query submitted for RAG processing only. Response will be sent via WebSocket."
+        else:
+            message = "Query submitted for LLM processing (no RAG). Response will be sent via WebSocket."
         
         return QuerySubmissionResponse(
             query_id=query_id,
             status="submitted",
-            message="Query submitted for processing. Response will be sent via WebSocket."
+            message=message
         )
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query submission failed: {str(e)}")
-
 
 @router.post("/submit-with-tts", response_model=QueryWithTTSResponse)
 async def submit_query_with_tts(
@@ -86,7 +99,7 @@ async def submit_query_with_tts(
     db: Session = Depends(get_db),
     current_user: UserTokenData = Depends(get_current_user)
 ):
-    """Submit a query that will be processed and converted to speech with optimized streaming"""
+    """Submit a query that will be processed and converted to speech with optional RAG fallback"""
     try:
         query_id = str(uuid4())
         tts_task_id = str(uuid4())
@@ -103,15 +116,89 @@ async def submit_query_with_tts(
             session_id=request.session_id,
             language=request.language,
             voice=request.voice,
-            stream_audio=request.stream_audio
+            stream_audio=request.stream_audio,
+            use_rag=request.use_rag,
+            fallback_on_error=request.fallback_on_error
         )
+        
+        # Create message based on RAG settings
+        if request.use_rag:
+            if request.fallback_on_error:
+                message = "Query and TTS submitted for RAG processing with LLM fallback. Audio will be streamed via WebSocket."
+            else:
+                message = "Query and TTS submitted for RAG processing only. Audio will be streamed via WebSocket."
+        else:
+            message = "Query and TTS submitted for LLM processing (no RAG). Audio will be streamed via WebSocket."
         
         return QueryWithTTSResponse(
             query_id=query_id,
             tts_task_id=tts_task_id,
             status="submitted",
-            message="Query and TTS submitted for processing. Audio will be streamed via WebSocket."
+            message=message
         )
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query with TTS submission failed: {str(e)}")
+
+@router.post("/audio-to-audio")
+async def process_audio_query(
+    audio_file: UploadFile = File(...),
+    language: str = "en",
+    voice: Optional[str] = "",
+    stream_audio: bool = True,
+    use_rag: Optional[bool] = True,  # Add RAG options to audio processing too
+    fallback_on_error: Optional[bool] = True,
+    db: Session = Depends(get_db),
+    current_user: UserTokenData = Depends(get_current_user)
+):
+    """Process audio input and return audio response with optional RAG fallback"""
+    try:
+        task_id = str(uuid4())
+        
+        # Read audio file
+        audio_content = await audio_file.read()
+        
+        # Submit to Celery for processing
+        audio_to_audio_pipeline.delay(
+            task_id=task_id,
+            audio_data=audio_content.decode('latin1'),  # Store as string for Celery
+            filename=audio_file.filename,
+            tenant_id=str(current_user.tenant_id),
+            user_id=str(current_user.user_id),
+            language=language,
+            voice=voice,
+            stream_audio=stream_audio,
+            use_rag=use_rag,
+            fallback_on_error=fallback_on_error
+        )
+        
+        # Create message based on RAG settings
+        if use_rag:
+            if fallback_on_error:
+                message = "Audio-to-audio processing started with RAG and LLM fallback."
+            else:
+                message = "Audio-to-audio processing started with RAG only."
+        else:
+            message = "Audio-to-audio processing started with LLM only (no RAG)."
+        
+        return {
+            "task_id": task_id,
+            "status": "submitted",
+            "message": message
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(e)}")
+
+@router.get("/status/{task_id}")
+async def get_task_status(task_id: str):
+    """Get the status of a processing task"""
+    try:
+        result = AsyncResult(task_id, app=celery_app)
+        return {
+            "task_id": task_id,
+            "status": result.status,
+            "result": result.result if result.ready() else None
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get task status: {str(e)}")

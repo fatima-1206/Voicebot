@@ -90,6 +90,15 @@ def format_prompt(question: str, context: str) -> str:
     Question: {question}
     Answer:"""
 
+def format_prompt_no_rag(question: str) -> str:
+    """Format prompt for non-RAG responses"""
+    with open("context.txt", "a") as f:
+        f.write(f"\n\nQuestion (No RAG): {question}\n")
+    return f"""You are an intelligent assistant capable of holding conversations. Your response should be concise, informative, and helpful. Answer the user's question to the best of your knowledge. Answer in a smooth paragraph format.
+
+    Question: {question}
+    Answer:"""
+
 # LLM wrapper
 def call_llm(question: str, context: str) -> str:
     """Call the LLM with question and context"""
@@ -118,6 +127,33 @@ def call_llm(question: str, context: str) -> str:
         torch.cuda.empty_cache()
     return tokenizer.decode(outputs[0], skip_special_tokens=True).replace(prompt, "").strip()
 
+def call_llm_no_rag(question: str) -> str:
+    """Call the LLM without RAG context - fallback mode"""
+    global model, tokenizer, device
+    
+    # Initialize if needed
+    if model is None or tokenizer is None:
+        initialize_model()
+    
+    with open("config.json", "r") as f:
+        config = json.load(f)
+    max_new_tokens = config["max_new_tokens"]
+    
+    # Use the no-RAG prompt function
+    prompt = format_prompt_no_rag(question)
+    
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.eos_token_id
+    )
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return tokenizer.decode(outputs[0], skip_special_tokens=True).replace(prompt, "").strip()
+
 class LambdaLLM(LLM):
     def _call(self, prompt: str, stop=None) -> str:
         # Here we pass the context and question to the call_llm function
@@ -128,25 +164,64 @@ class LambdaLLM(LLM):
     def _llm_type(self) -> str:
         return "custom_llm"
 
-def generate_response(query: str) -> str:
+def generate_response(query: str, use_rag: bool = True, fallback_on_error: bool = True) -> str:
     """
-    Generate a response to the given query using the RAG chain.
-    Thread-safe for Celery workers.
+    Generate a response to the given query.
+    
+    Args:
+        query: The user's question
+        use_rag: Whether to use RAG or just LLM
+        fallback_on_error: Whether to fallback to non-RAG if RAG fails
+    
+    Returns:
+        Generated response string
     """
     global rag_chain
     
-    # Initialize if needed (for non-Celery usage)
-    if rag_chain is None:
-        initialize_rag_chain()
+    # If user explicitly doesn't want RAG, use LLM directly
+    if not use_rag:
+        print("🔄 Using LLM without RAG (user preference)")
+        try:
+            response = call_llm_no_rag(query)
+            return profanity.censor(response) if response else "I apologize, but I couldn't generate a response."
+        except Exception as e:
+            print(f"❌ Error in LLM-only mode: {e}")
+            return "I apologize, but I'm having technical difficulties and cannot generate a response right now."
     
+    # Try RAG first
     try:
+        # Initialize if needed (for non-Celery usage)
+        if rag_chain is None:
+            initialize_rag_chain()
+        
+        print("🔄 Using RAG pipeline")
         result = rag_chain.invoke({"query": query})
         if result and "result" in result:
-            return profanity.censor(result["result"])
-        return "No answer found."
+            response = profanity.censor(result["result"])
+            if response and response.strip():
+                return response
+            else:
+                raise ValueError("Empty response from RAG")
+        else:
+            raise ValueError("No result from RAG chain")
+            
     except Exception as e:
-        print(f"❌ Error in generate_response: {e}")
-        return f"Error generating response: {str(e)}"
+        print(f"❌ Error in RAG pipeline: {e}")
+        
+        # Fallback to LLM without RAG if enabled
+        if fallback_on_error:
+            print("🔄 Falling back to LLM without RAG")
+            try:
+                response = call_llm_no_rag(query)
+                if response and response.strip():
+                    return profanity.censor(response)
+                else:
+                    return "I apologize, but I couldn't generate a proper response to your question."
+            except Exception as fallback_error:
+                print(f"❌ Error in fallback LLM: {fallback_error}")
+                return "I apologize, but I'm experiencing technical difficulties and cannot respond right now."
+        else:
+            return f"Error generating response with RAG: {str(e)}"
 
 def generate_response_with_reranking(query: str, top_k: int = 2) -> str:
     """
@@ -191,20 +266,24 @@ def test_response_generation():
     result = profanity.censor(result["result"]) if result and "result" in result else "No answer found."
     print("💬 Answer:", result)
     print("\n")
+    
     query = "Answer this in urdu. If you don't know the answer just say that you don't know. Question: اگر آپ کو جواب نہیں معلوم تو بس اتنا کہہ دیں۔ میرا سوال یہ ہے: فاسٹ یونیورسٹی میں طلباء کے لیے ڈریس کوڈ کیا ہے؟"
     print("Query:", query)
     result = profanity.censor(result["result"]) if result and "result" in result else "No answer found."
     print("💬 Answer:", result)
 
-
 # For Celery worker initialization
 def initialize_for_celery():
     """Initialize all components for Celery worker"""
-    print("🔧 Initializing response generation for Celery worker...")
     try:
         initialize_model()
         initialize_rag_chain()
-        print("✅ Response generation initialized for Celery")
+        print("✅ All components initialized for Celery worker")
     except Exception as e:
-        print(f"❌ Failed to initialize response generation for Celery: {e}")
-        raise
+        print(f"❌ Failed to initialize components for Celery: {e}")
+        # Still initialize the model so we can use fallback mode
+        try:
+            initialize_model()
+            print("✅ Model initialized for fallback mode")
+        except Exception as model_error:
+            print(f"❌ Failed to initialize model: {model_error}")

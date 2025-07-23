@@ -63,3 +63,4 @@ scraper
 celery[redis]
 tiktoken
 groq
+better-profanity

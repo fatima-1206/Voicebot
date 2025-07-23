@@ -7,7 +7,9 @@ from backend.workers.utilities import (
 )
 from backend.workers.tts_tasks import generate_and_stream_tts, generate_tts_file
 from backend.response_generation.generator import generate_response
+from better_profanity import profanity
 
+profanity.load_censor_words()
 # TODO: Add a fall back to no rag, only simple rag if the user passes a param 
 @celery_app.task(name='process_query', bind=True)
 def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id: str, 
@@ -19,7 +21,8 @@ def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id:
         try:
             # Generate response
             response = generate_response(query)
-            
+            if response:
+                response = profanity.censor(response)  # Apply profanity filter
             # Save to database
             save_query_to_database(query_id, user_id, session_id, query, response)
             
@@ -61,6 +64,11 @@ def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: st
         try:
             # Step 1: Generate text response
             response_text = generate_response(query)
+            if response_text:
+                response_text = profanity.censor(response_text)  # Apply profanity filter
+            else:
+                print("   ❌ No response generated")
+                return {"status": "no_response", "query_id": query_id}
             print(f"✅ [RAG] Generated: {response_text[:50]}...")
             
             # Step 2: Immediately notify WebSocket that text is ready

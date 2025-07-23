@@ -7,6 +7,8 @@ import soundfile as sf
 import sounddevice as sd
 from groq import Groq
 
+# TODO: Add a fallback in case the limit of play tts is reached
+
 # Ensure output directory exists
 os.makedirs("backend/rag/temp_audioFiles", exist_ok=True)
 

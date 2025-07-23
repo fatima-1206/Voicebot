@@ -123,12 +123,24 @@ def save_query_to_database(query_id: str, user_id: str, session_id: str, query: 
     try:
         with get_db_session() as db:
             from backend.db.models import QueryLog
+            from uuid import uuid4, UUID
+            
+            # Handle session_id validation
+            processed_session_id = None
+            if session_id:
+                try:
+                    # Try to parse as UUID - if it's a valid UUID string, use it
+                    processed_session_id = UUID(session_id) if isinstance(session_id, str) else session_id
+                except ValueError:
+                    # If it's not a valid UUID (like "string"), set to None
+                    print(f"⚠️ [DB] Invalid session_id '{session_id}', setting to None")
+                    processed_session_id = None
             
             # Create new query record
             db_query = QueryLog(
                 id=query_id,
                 user_id=user_id,
-                session_id=session_id,
+                session_id=processed_session_id,  # Use processed session_id
                 query=query,
                 response=response,
                 timestamp=datetime.now()

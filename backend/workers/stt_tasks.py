@@ -18,7 +18,6 @@ from better_profanity import profanity
 
 profanity.load_censor_words()
 
-# TODO: add a profanity filter on the stt
 
 def bytes_to_numpy_audio(audio_bytes: bytes) -> np.ndarray:
     """Convert audio bytes to numpy array - handles multiple formats"""

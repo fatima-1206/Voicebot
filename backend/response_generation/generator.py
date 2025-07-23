@@ -6,12 +6,15 @@ from langchain_core.language_models import LLM
 from langchain.chains import RetrievalQA
 from langchain.schema import Document
 from typing import Optional
+from better_profanity import profanity
 
 # Global variables for model and tokenizer
 model = None
 tokenizer = None
 rag_chain = None
 device = None
+
+profanity.load_censor_words()
 
 # ---------------- Setup ------------------
 def initialize_model():
@@ -138,7 +141,9 @@ def generate_response(query: str) -> str:
     
     try:
         result = rag_chain.invoke({"query": query})
-        return result["result"] if "result" in result else "No answer found."
+        if result and "result" in result:
+            return profanity.censor(result["result"])
+        return "No answer found."
     except Exception as e:
         print(f"❌ Error in generate_response: {e}")
         return f"Error generating response: {str(e)}"
@@ -183,13 +188,14 @@ def test_response_generation():
     query = "If you don't know the answer just say so. here is my question: What is the dress code for students at FAST University?"
     print("Query:", query)
     result = rag_chain.invoke({"query": query})
-    print("💬 Answer:", result["result"])
-    
+    result = profanity.censor(result["result"]) if result and "result" in result else "No answer found."
+    print("💬 Answer:", result)
     print("\n")
     query = "Answer this in urdu. If you don't know the answer just say that you don't know. Question: اگر آپ کو جواب نہیں معلوم تو بس اتنا کہہ دیں۔ میرا سوال یہ ہے: فاسٹ یونیورسٹی میں طلباء کے لیے ڈریس کوڈ کیا ہے؟"
     print("Query:", query)
-    result = rag_chain.invoke({"query": query})
-    print("💬 Answer:", result["result"])
+    result = profanity.censor(result["result"]) if result and "result" in result else "No answer found."
+    print("💬 Answer:", result)
+
 
 # For Celery worker initialization
 def initialize_for_celery():

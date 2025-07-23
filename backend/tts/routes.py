@@ -139,22 +139,14 @@ async def get_available_voices():
     Get list of available voices for different languages
     """
     voices = {
-        "urdu": [
-            "ur-PK-UzmaNeural",
-            "ur-PK-AsadNeural"
-        ],
         "english": [
-            "en-US-JennyNeural",
-            "en-US-GuyNeural",
-            "en-US-AriaNeural",
-            "en-US-DavisNeural",
-            "en-US-ElizabethNeural",
-            "en-US-EricNeural",
-            "en-US-MichelleNeural"
+            "Fritz-PlayAI",
+            "Angelo-PlayAI",
+            "Thunder-PlayAI"
         ],
-        "hindi": [
-            "hi-IN-MadhurNeural",
-            "hi-IN-SwaraNeural"
+
+        "default": [
+            "Fritz-PlayAI"
         ]
     }
     
@@ -162,8 +154,10 @@ async def get_available_voices():
         "status": "success",
         "voices": voices,
         "default_voices": {
-            "ur": "ur-PK-UzmaNeural",
-            "en": "en-US-JennyNeural",
-            "hi": "hi-IN-SwaraNeural"
-        }
+            "ur": "Fritz-PlayAI",
+            "en": "Fritz-PlayAI",
+            "default": "Fritz-PlayAI"
+        },
+        "provider": "Groq PlayAI",
+        "model": "playai-tts"
     }

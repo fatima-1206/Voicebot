@@ -56,3 +56,7 @@ The text query response will be printed on the terminal and the audio output wil
 **Note**: If the program does not stop after pressing Ctrl+C, open a new terminal in the same directory and run the following command:
 
 ```./stop.sh```
+
+If it still does not work, run the following command:
+
+```redis-cli -n 0 FLUSHDB && redis-cli -n 1 FLUSHDB```

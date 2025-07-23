@@ -1,22 +1,44 @@
 import asyncio
-import edge_tts
-import soundfile as sf
-import sounddevice as sd
 import os
 import uuid
 from datetime import datetime
 from typing import Optional, Union
+import soundfile as sf
+import sounddevice as sd
+from groq import Groq
 
 # Ensure output directory exists
 os.makedirs("backend/rag/temp_audioFiles", exist_ok=True)
 
-async def synthesize_text(text, voice="ur-PK-UzmaNeural", output_file="backend/rag/temp_audioFiles/output.wav"):
-    """Async function to synthesize text to speech using edge-tts"""
-    communicate = edge_tts.Communicate(text, voice)
-    with open(output_file, "wb") as f:
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                f.write(chunk["data"])
+# Initialize Groq client
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+def synthesize_text_groq(text, voice="Fritz-PlayAI", output_file="backend/rag/temp_audioFiles/output.wav"):
+    """Synchronous function to synthesize text to speech using Groq API"""
+    try:
+        response = groq_client.audio.speech.create(
+            model="playai-tts",
+            voice=voice,
+            input=text,
+            response_format="wav"
+        )
+        
+        response.write_to_file(output_file)
+        return True
+    except Exception as e:
+        print(f"Error in Groq TTS synthesis: {e}")
+        return False
+
+async def synthesize_text(text, voice="Fritz-PlayAI", output_file="backend/rag/temp_audioFiles/output.wav"):
+    """Async wrapper for Groq TTS synthesis"""
+    # Run the synchronous Groq call in a thread pool
+    import asyncio
+    loop = asyncio.get_event_loop()
+    
+    def sync_synthesize():
+        return synthesize_text_groq(text, voice, output_file)
+    
+    return await loop.run_in_executor(None, sync_synthesize)
 
 def play_audio(file_path):
     """Play audio file using sounddevice"""
@@ -29,9 +51,22 @@ def play_audio(file_path):
         print(f"Error playing audio: {e}")
         return False
 
+def get_groq_voice_for_language(language: str) -> str:
+    """Get appropriate Groq voice for the given language"""
+    # Load from config or use defaults
+    try:
+        import json
+        with open("config.json", "r") as f:
+            config = json.load(f)
+        voices = config.get("groq_tts", {}).get("voices", {})
+        return voices.get(language, "Fritz-PlayAI")
+    except:
+        # Fallback to default voice for all languages since Groq has limited voice options
+        return "Fritz-PlayAI"
+
 def tts(text: str, language: str, voice: str = "", output_filename: str = None, play_audio_flag: bool = True) -> str:
     """
-    Synchronous Text-to-Speech function to convert text to audio.
+    Synchronous Text-to-Speech function to convert text to audio using Groq.
     
     Args:
         text (str): The text to convert to speech.
@@ -43,13 +78,9 @@ def tts(text: str, language: str, voice: str = "", output_filename: str = None, 
     Returns:
         str: Path to the saved audio file.
     """
-    # Set default voices based on language
-    if language == "ur" and not voice:
-        voice = "ur-PK-UzmaNeural"
-    elif language == "en" and not voice:
-        voice = "en-US-JennyNeural"
-    elif not voice:
-        voice = "en-US-JennyNeural"  # Default fallback
+    # Set voice based on language or use provided voice
+    if not voice:
+        voice = get_groq_voice_for_language(language)
 
     # Generate unique filename if not provided
     if not output_filename:
@@ -63,8 +94,11 @@ def tts(text: str, language: str, voice: str = "", output_filename: str = None, 
     
     output_file = f"backend/rag/temp_audioFiles/{output_filename}"
     
-    # Run async synthesis
-    asyncio.run(synthesize_text(text, voice, output_file))
+    # Generate audio using Groq
+    success = synthesize_text_groq(text, voice, output_file)
+    
+    if not success:
+        raise Exception("Failed to generate audio using Groq TTS")
     
     # Play audio if requested
     if play_audio_flag:
@@ -136,14 +170,14 @@ def get_tts_task_status(task_id: str) -> dict:
 
 def test_tts():
     """Test function for TTS functionality"""
-    urdu_text = "ہیلو، آپ کیسے ہیں؟ میں آپ کی کس طرح مدد کر سکتی ہوں؟"
+    urdu_text = "Hello, how are you? How can I help you today?"
     
-    print("Testing synchronous TTS...")
-    output_file = tts(urdu_text, language="ur", voice="ur-PK-UzmaNeural")
+    print("Testing synchronous Groq TTS...")
+    output_file = tts(urdu_text, language="ur", voice="Fritz-PlayAI")
     print(f"Synchronous TTS completed: {output_file}")
     
     print("\nTesting asynchronous TTS...")
-    task_id = tts_async(urdu_text, language="ur", voice="ur-PK-UzmaNeural")
+    task_id = tts_async(urdu_text, language="ur", voice="Fritz-PlayAI")
     print(f"Async TTS task submitted: {task_id}")
     
     # Check task status

@@ -42,8 +42,17 @@
   "temperature": 0.7,
 
   "reranker_model_id": "BAAI/bge-reranker-base",
-  "multilingual_reranker_model_id": "BAAI/bge-m3"
+  "multilingual_reranker_model_id": "BAAI/bge-m3",
+
+  "groq_tts": {
+    "model": "playai-tts",
+    "response_format": "wav",
+    "voices": {
+      "en": "Fritz-PlayAI",
+      "ur": "Fritz-PlayAI"
+    },
+    "default_voice": "Fritz-PlayAI"
+  }
 }
 
-   
-  
+

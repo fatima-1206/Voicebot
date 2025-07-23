@@ -15,17 +15,27 @@ import io
 import wave
 from faster_whisper import WhisperModel
 import tempfile
+import os
+import redis
+from groq import Groq  # Add Groq import
+
 model = WhisperModel("medium", device="cuda", compute_type="float16")
 from silero_vad import load_silero_vad, get_speech_timestamps, collect_chunks
 import numpy as np
 import time
 import traceback
-import os
-import redis
 
 # Load VAD model (you might want to load this once globally)
 vad_model = load_silero_vad()
 sample_rate = 16000  # Assuming 16kHz audio
+
+# Initialize Groq client globally
+groq_client = None
+try:
+    groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+    print("✅ Groq TTS client initialized")
+except Exception as e:
+    print(f"❌ Groq TTS client initialization failed: {e}")
 
 # Add Redis connection for WebSocket messaging
 # Add error handling for Redis operations
@@ -417,227 +427,167 @@ def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: st
 
 def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id: str, 
                            language: str, voice: str) -> dict:
-    """Generate TTS and stream via WebSocket"""
-    import asyncio
-    import edge_tts
-    import os
-    from datetime import datetime
+    """Generate TTS using Groq and stream via WebSocket"""
+    global groq_client
     
-    # Set voice based on language
-    if language == "ur" and not voice:
-        voice = "ur-PK-UzmaNeural"
-    elif language == "en" and not voice:
-        voice = "en-US-JennyNeural"
-    elif not voice:
-        voice = "en-US-JennyNeural"
-    
-    # Generate filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"tts_{timestamp}_{tts_task_id[:8]}.wav"
-    output_dir = "backend/rag/temp_audioFiles"
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, filename)
-    
-    async def generate_and_stream():
-        try:
-            # Notify start
-            notify_audio_status(tenant_id, user_id, tts_task_id, "generating", 
-                              {"message": "Audio generation started"})
-            
-            # Generate audio
-            communicate = edge_tts.Communicate(text, voice)
-            
-            with open(output_path, "wb") as f:
-                async for chunk in communicate.stream():
-                    if chunk["type"] == "audio":
-                        f.write(chunk["data"])
-            
-            # Notify ready and stream
-            if os.path.exists(output_path):
-                file_size = os.path.getsize(output_path)
-                
-                notify_audio_status(tenant_id, user_id, tts_task_id, "ready", {
-                    "filename": filename,
-                    "file_size": file_size,
-                    "audio_url": f"/tts/download/{filename}",
-                    "voice": voice,
-                    "language": language
-                })
-                
-                # Stream audio file
-                await stream_audio_file(tenant_id, user_id, output_path, tts_task_id)
-                
-                return {"filename": filename, "file_size": file_size}
-            
-        except Exception as e:
-            notify_audio_status(tenant_id, user_id, tts_task_id, "error", {"error": str(e)})
-            raise e
-    
-    # Run async generation
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        return loop.run_until_complete(generate_and_stream())
-    finally:
-        loop.close()
+        # Initialize Groq client if not already done
+        if groq_client is None:
+            groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+        
+        # Set voice based on language - Groq has limited voice options
+        if not voice:
+            voice = "Fritz-PlayAI"  # Default Groq voice for all languages
+        
+        # Generate filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"tts_{timestamp}_{tts_task_id[:8]}.wav"
+        output_dir = "backend/rag/temp_audioFiles"
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, filename)
+        
+        # Notify start
+        notify_audio_status(tenant_id, user_id, tts_task_id, "generating", 
+                          {"message": "Audio generation started"})
+        
+        print(f"🔄 [TTS] Generating audio with Groq: {text[:50]}...")
+        
+        # Generate audio using Groq
+        response = groq_client.audio.speech.create(
+            model="playai-tts",
+            voice=voice,
+            input=text,
+            response_format="wav"
+        )
+        
+        # Write to file
+        response.write_to_file(output_path)
+        
+        print(f"✅ [TTS] Audio generated: {filename}")
+        
+        # Verify file was created and get size
+        if os.path.exists(output_path):
+            file_size = os.path.getsize(output_path)
+            
+            # Notify ready
+            notify_audio_status(tenant_id, user_id, tts_task_id, "ready", {
+                "filename": filename,
+                "file_size": file_size,
+                "audio_url": f"/tts/download/{filename}",
+                "voice": voice,
+                "language": language,
+                "provider": "Groq PlayAI"
+            })
+            
+            # Stream audio file via WebSocket
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(stream_audio_file(tenant_id, user_id, output_path, tts_task_id))
+                finally:
+                    loop.close()
+            except Exception as stream_error:
+                print(f"⚠️ [TTS] Audio streaming failed: {stream_error}")
+                # Continue anyway, file is still available for download
+            
+            return {"filename": filename, "file_size": file_size, "status": "success"}
+        else:
+            raise Exception("Audio file was not created")
+        
+    except Exception as e:
+        print(f"❌ [TTS] Groq generation failed: {e}")
+        notify_audio_status(tenant_id, user_id, tts_task_id, "error", {
+            "error": str(e),
+            "provider": "Groq PlayAI"
+        })
+        raise e
 
 def generate_tts_file(text: str, tts_task_id: str, language: str, voice: str) -> dict:
-    """Generate TTS file without streaming"""
-    import asyncio
-    import edge_tts
-    import os
-    from datetime import datetime
+    """Generate TTS file using Groq without streaming"""
+    global groq_client
     
-    # Set voice
-    if language == "ur" and not voice:
-        voice = "ur-PK-UzmaNeural"
-    elif language == "en" and not voice:
-        voice = "en-US-JennyNeural"
-    elif not voice:
-        voice = "en-US-JennyNeural"
-    
-    # Generate filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"tts_{timestamp}_{tts_task_id[:8]}.wav"
-    output_dir = "backend/rag/temp_audioFiles"
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, filename)
-    
-    async def generate():
-        communicate = edge_tts.Communicate(text, voice)
-        with open(output_path, "wb") as f:
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    f.write(chunk["data"])
-    
-    # Run generation
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(generate())
+        # Initialize Groq client if not already done
+        if groq_client is None:
+            groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+        
+        # Set voice - Groq has limited options
+        if not voice:
+            voice = "Fritz-PlayAI"  # Default Groq voice
+        
+        # Generate filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"tts_{timestamp}_{tts_task_id[:8]}.wav"
+        output_dir = "backend/rag/temp_audioFiles"
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, filename)
+        
+        print(f"🔄 [TTS] Generating audio file with Groq: {text[:50]}...")
+        
+        # Generate audio using Groq
+        response = groq_client.audio.speech.create(
+            model="playai-tts",
+            voice=voice,
+            input=text,
+            response_format="wav"
+        )
+        
+        # Write to file
+        response.write_to_file(output_path)
+        
+        if os.path.exists(output_path):
+            file_size = os.path.getsize(output_path)
+            print(f"✅ [TTS] File generated: {filename} ({file_size} bytes)")
+            return {
+                "filename": filename, 
+                "file_size": file_size,
+                "status": "success",
+                "provider": "Groq PlayAI"
+            }
+        else:
+            raise Exception("Failed to generate TTS file")
+            
+    except Exception as e:
+        print(f"❌ [TTS] Groq file generation failed: {e}")
+        raise Exception(f"Groq TTS generation failed: {str(e)}")
+
+@celery_app.task(name='process_tts', bind=True)
+def process_tts_task(self, text: str, language: str, voice: str = "", output_filename: str = None, play_audio: bool = False):
+    """
+    Process Text-to-Speech conversion using Groq (standalone TTS)
+    """
+    print(f"🔄 [TTS] Processing: {text[:50]}...")
+    
+    try:
+        # Use the tts_task_id from the task itself
+        task_id = self.request.id or str(uuid4())
+        
+        result = generate_tts_file(text, task_id, language, voice)
+        
         return {
-            "filename": filename, 
-            "file_size": os.path.getsize(output_path) if os.path.exists(output_path) else 0
-        }
-    finally:
-        loop.close()
-
-async def stream_audio_file(tenant_id: str, user_id: str, file_path: str, tts_task_id: str):
-    """Stream audio file in chunks via WebSocket"""
-    try:
-        import base64
-        
-        chunk_size = 4096  # 4KB chunks
-        
-        with open(file_path, "rb") as audio_file:
-            chunk_number = 0
-            while True:
-                chunk = audio_file.read(chunk_size)
-                if not chunk:
-                    break
-                
-                chunk_b64 = base64.b64encode(chunk).decode('utf-8')
-                
-                # Send via Redis
-                message = {
-                    "type": "audio_chunk",
-                    "tts_task_id": tts_task_id,
-                    "chunk_number": chunk_number,
-                    "chunk_data": chunk_b64,
-                    "is_final": False
-                }
-                
-                channel = f"ws:{tenant_id}:{user_id}"
-                redis_client.publish(channel, json.dumps(message))
-                
-                chunk_number += 1
-                await asyncio.sleep(0.01)  # Small delay
-        
-        # Send final chunk marker
-        final_message = {
-            "type": "audio_chunk",
-            "tts_task_id": tts_task_id,
-            "chunk_number": chunk_number,
-            "chunk_data": "",
-            "is_final": True
+            "status": "success",
+            "task_id": task_id,
+            "text": text,
+            "language": language,
+            "voice": voice or "Fritz-PlayAI",
+            "output_file": result["filename"],
+            "file_size": result["file_size"],
+            "provider": "Groq PlayAI",
+            "worker": self.request.hostname
         }
         
-        channel = f"ws:{tenant_id}:{user_id}"
-        redis_client.publish(channel, json.dumps(final_message))
-        
     except Exception as e:
-        print(f"❌ Error streaming audio: {e}")
-
-# Helper notification functions (using Redis)
-def notify_text_response_ready(tenant_id: str, user_id: str, query_id: str, query: str, response: str):
-    """Notify that text response is ready"""
-    try:
-        message = {
-            "type": "query_response",
-            "query_id": query_id,
-            "query": query,
-            "response": response,
-            "timestamp": datetime.utcnow().isoformat()
+        print(f"❌ [TTS] Error: {e}")
+        return {
+            "status": "error",
+            "task_id": self.request.id,
+            "text": text,
+            "error": str(e),
+            "provider": "Groq PlayAI",
+            "worker": self.request.hostname
         }
-        
-        channel = f"ws:{tenant_id}:{user_id}"
-        redis_client.publish(channel, json.dumps(message))
-        
-    except Exception as e:
-        print(f"❌ Error notifying text response: {e}")
-
-def notify_audio_status(tenant_id: str, user_id: str, tts_task_id: str, status: str, data: dict):
-    """Notify audio status updates"""
-    try:
-        message = {
-            "type": "audio_status",
-            "tts_task_id": tts_task_id,
-            "status": status,
-            "data": data,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
-        channel = f"ws:{tenant_id}:{user_id}"
-        redis_client.publish(channel, json.dumps(message))
-        
-    except Exception as e:
-        print(f"❌ Error notifying audio status: {e}")
-
-def notify_error(tenant_id: str, user_id: str, query_id: str, error: str):
-    """Notify error via WebSocket"""
-    try:
-        message = {
-            "type": "error",
-            "query_id": query_id,
-            "error": error,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
-        channel = f"ws:{tenant_id}:{user_id}"
-        redis_client.publish(channel, json.dumps(message))
-        
-    except Exception as e:
-        print(f"❌ Error notifying error: {e}")
-
-def save_query_to_database(query_id: str, user_id: str, session_id: str, query: str, response: str):
-    """Save query log to database"""
-    try:
-        with get_db_session() as db:
-            from backend.db.models import QueryLog as DB_QueryLog
-            
-            query_log_record = DB_QueryLog(
-                id=UUID(query_id),
-                user_id=UUID(user_id),
-                session_id=UUID(session_id) if session_id and session_id != 'string' else None,
-                query=query,
-                response=response,
-                timestamp=datetime.utcnow()
-            )
-            db.add(query_log_record)
-            db.commit()
-            
-    except Exception as e:
-        print(f"❌ Error saving to database: {e}")
 
 
 # REGULAR PROCESSING TASKS (for non-conversation mode)------------------------
@@ -677,37 +627,6 @@ def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id:
                 "error": str(e),
                 "worker": self.request.hostname
             }
-
-@celery_app.task(name='process_tts', bind=True)
-def process_tts_task(self, text: str, language: str, voice: str = "", output_filename: str = None, play_audio: bool = False):
-    """
-    Process Text-to-Speech conversion (standalone TTS)
-    """
-    print(f"🔄 [TTS] Processing: {text[:50]}...")
-    
-    try:
-        result = generate_tts_file(text, str(uuid4()), language, voice)
-        
-        return {
-            "status": "success",
-            "task_id": self.request.id,
-            "text": text,
-            "language": language,
-            "voice": voice,
-            "output_file": result["filename"],
-            "file_size": result["file_size"],
-            "worker": self.request.hostname
-        }
-        
-    except Exception as e:
-        print(f"❌ [TTS] Error: {e}")
-        return {
-            "status": "error",
-            "task_id": self.request.id,
-            "text": text,
-            "error": str(e),
-            "worker": self.request.hostname
-        }
 
 
 # DOCUMENT PROCESSING TASKS (unchanged)--------------------------------------
@@ -1060,3 +979,130 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
     except Exception as e:
         print(f"❌ [SPEECH] Error processing segment: {e}")
         return {"status": "error", "chunk_id": chunk_id, "error": str(e)}
+
+
+# Add these missing helper functions at the end of the file:
+
+def notify_audio_status(tenant_id: str, user_id: str, task_id: str, status: str, data: dict):
+    """Notify audio status via WebSocket"""
+    try:
+        message = {
+            "type": "audio_status",
+            "task_id": task_id,
+            "status": status,
+            "data": data,
+            "timestamp": datetime.now().isoformat()
+        }
+        redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(message))
+        print(f"📡 [WS] Audio status sent: {status} for task {task_id[:8]}")
+    except Exception as e:
+        print(f"❌ Failed to notify audio status: {e}")
+
+def notify_text_response_ready(tenant_id: str, user_id: str, query_id: str, query: str, response: str):
+    """Notify that text response is ready"""
+    try:
+        message = {
+            "type": "text_response",
+            "query_id": query_id,
+            "query": query,
+            "response": response,
+            "timestamp": datetime.now().isoformat()
+        }
+        redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(message))
+        print(f"📡 [WS] Text response sent for query {query_id[:8]}")
+    except Exception as e:
+        print(f"❌ Failed to notify text response: {e}")
+
+def notify_error(tenant_id: str, user_id: str, query_id: str, error: str):
+    """Notify error via WebSocket"""
+    try:
+        message = {
+            "type": "error",
+            "query_id": query_id,
+            "error": error,
+            "timestamp": datetime.now().isoformat()
+        }
+        redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(message))
+        print(f"📡 [WS] Error sent for query {query_id[:8]}: {error}")
+    except Exception as e:
+        print(f"❌ Failed to notify error: {e}")
+
+async def stream_audio_file(tenant_id: str, user_id: str, file_path: str, task_id: str):
+    """Stream audio file content via WebSocket in chunks"""
+    try:
+        import base64
+        
+        # Read and encode audio file
+        with open(file_path, 'rb') as f:
+            audio_data = f.read()
+        
+        # Encode to base64 for transmission
+        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+        
+        # Send audio stream message
+        message = {
+            "type": "audio_stream",
+            "task_id": task_id,
+            "audio_data": audio_base64,
+            "format": "wav",
+            "encoding": "base64",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(message))
+        print(f"📡 [WS] Audio stream sent for task {task_id[:8]} ({len(audio_data)} bytes)")
+        
+    except Exception as e:
+        print(f"❌ Failed to stream audio file: {e}")
+        # Send error notification
+        error_message = {
+            "type": "audio_stream_error",
+            "task_id": task_id,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+        redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(error_message))
+
+def save_query_to_database(query_id: str, user_id: str, session_id: str, query: str, response: str):
+    """Save query and response to database"""
+    try:
+        with get_db_session() as db:
+            from backend.db.models import Query
+            
+            # Create new query record
+            db_query = Query(
+                id=query_id,
+                user_id=user_id,
+                session_id=session_id,
+                query_text=query,
+                response_text=response,
+                created_at=datetime.now()
+            )
+            
+            db.add(db_query)
+            db.commit()
+            
+            print(f"💾 [DB] Query saved: {query_id[:8]}")
+            
+    except Exception as e:
+        print(f"❌ Failed to save query to database: {e}")
+        # Don't raise exception - this shouldn't break the main workflow
+
+def should_respond_to_transcript(transcript: str) -> bool:
+    """Determine if we should generate a response to this transcript"""
+    if not transcript or len(transcript.strip()) < 3:
+        return False
+    
+    # Add your logic here - for now, respond to everything
+    # You might want to filter out background noise, incomplete sentences, etc.
+    
+    # Don't respond to very short utterances
+    if len(transcript.split()) < 2:
+        return False
+    
+    # Don't respond to common filler words
+    filler_words = {"um", "uh", "hmm", "okay", "yeah", "yes", "no"}
+    if transcript.lower().strip() in filler_words:
+        return False
+    
+    return True

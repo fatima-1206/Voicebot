@@ -1,0 +1,65 @@
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: voicebot
+      POSTGRES_USER: postgres  
+      POSTGRES_PASSWORD: voicebot_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=voicebot
+      - DB_PASSWORD=voicebot_password
+      - DB_URL=postgresql://postgres:voicebot_password@db:5432/voicebot
+      - SECRET_KEY=${SECRET_KEY:-dev-secret}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+    volumes:
+      # Mount your entire backend for live reloading
+      - ../backend:/app/backend:cached
+      # Mount config for easy changes
+      - ./config.docker.json:/app/config.json
+      # Mount for any temp files
+      - ../backend/rag/temp_audioFiles:/app/backend/rag/temp_audioFiles
+    depends_on:
+      - db
+      - redis
+    # Enable auto-reload for development
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload --log-level debug
+    
+  celery-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - DB_HOST=db
+      - DB_PASSWORD=voicebot_password
+      - DB_URL=postgresql://postgres:voicebot_password@db:5432/voicebot
+      - GROQ_API_KEY=${GROQ_API_KEY}
+    volumes:
+      # Same mounts as web service
+      - ../backend:/app/backend:cached
+      - ./config.docker.json:/app/config.json
+    depends_on:
+      - db
+      - redis
+    # Auto-restart celery worker on code changes
+    command: watchdog celery -A backend.workers.celery_worker.celery_app worker --loglevel=info
+
+volumes:
+  postgres_data:

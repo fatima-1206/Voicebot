@@ -14,6 +14,9 @@ import time
 from datetime import datetime
 from uuid import uuid4
 from silero_vad import get_speech_timestamps, collect_chunks
+from better_profanity import profanity
+
+profanity.load_censor_words()
 
 # TODO: add a profanity filter on the stt
 
@@ -136,7 +139,6 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
     This is called directly from WebSocket audio streams
     """
     print(f"🔄 [STT] Transcribing chunk {chunk_id} for user {user_id}")
-    
     try:
         # Clear GPU cache at start
         if torch.cuda.is_available():
@@ -193,6 +195,9 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
                 })
         
         full_transcript = " ".join(transcript_parts)
+        # apply the profanity filter
+        if full_transcript:
+            full_transcript = profanity.censor(full_transcript)
         confidence = getattr(info, 'language_probability', 0.0)
         detected_language = getattr(info, 'language', 'unknown')
         
@@ -278,6 +283,10 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
         
         transcript = " ".join(transcript_parts).strip()
         
+        # apply the profanity filter
+        if transcript:
+            transcript = profanity.censor(transcript)
+
         # Send partial result immediately
         start_time = time.time()
         result = {
@@ -426,7 +435,9 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
         if not transcript:
             print(f"   ❌ No transcript generated")
             return {"status": "no_transcript", "chunk_id": chunk_id}
-        
+        else:
+            transcript = profanity.censor(transcript)
+
         print(f"   📝 Transcript: '{transcript}'")
         
         # Send STT result immediately

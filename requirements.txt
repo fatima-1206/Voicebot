@@ -62,3 +62,4 @@ huggingface_hub
 scraper
 celery[redis]
 tiktoken
+groq

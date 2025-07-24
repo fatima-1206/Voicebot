@@ -271,16 +271,33 @@ def notify_error(tenant_id: str, user_id: str, query_id: str, error: str) -> boo
 def save_query_to_database(query_id: str, user_id: str, session_id: str, query: str, response: str) -> bool:
     """Save query and response to database with improved error handling"""
     try:
+        import uuid
+        
         with get_db_session() as db:
-            from backend.db.models import QueryHistory
+            from backend.db.models import QueryLog
             
-            query_record = QueryHistory(
-                id=query_id,
-                user_id=user_id,
-                session_id=session_id,
+            # Handle session_id conversion
+            processed_session_id = None
+            if session_id and session_id != "string" and session_id.lower() != "none":
+                try:
+                    # Try to parse as UUID if it's a valid UUID string
+                    processed_session_id = uuid.UUID(session_id)
+                except ValueError:
+                    # If not a valid UUID, generate a new one
+                    processed_session_id = uuid.uuid4()
+                    logger.warning(f"⚠️ Invalid session_id '{session_id}', generated new UUID: {processed_session_id}")
+            else:
+                # Generate a new session ID if None or invalid
+                processed_session_id = uuid.uuid4()
+                logger.info(f"📝 Generated new session_id: {processed_session_id}")
+            
+            query_record = QueryLog(
+                id=uuid.UUID(query_id),
+                user_id=uuid.UUID(user_id),
+                session_id=processed_session_id,
                 query=query,
                 response=response,
-                created_at=datetime.now()
+                timestamp=datetime.now()
             )
             
             db.add(query_record)
@@ -292,7 +309,7 @@ def save_query_to_database(query_id: str, user_id: str, session_id: str, query: 
     except Exception as e:
         logger.error(f"❌ Failed to save query to database: {e}")
         return False
-
+    
 def get_redis_health() -> Dict[str, Any]:
     """Get Redis health information"""
     return {

@@ -181,7 +181,7 @@ class ConnectionManager:
             return False
         
         ws = None
-        with self._lock:
+        with self._sync_lock:
             ws = self.active_connections.get(key)
             if ws:
                 # Update activity
@@ -224,7 +224,7 @@ class ConnectionManager:
             return False
         
         ws = None
-        with self._lock:
+        with self._sync_lock:
             ws = self.active_connections.get(key)
             if ws:
                 # Update activity
@@ -253,7 +253,7 @@ class ConnectionManager:
         
         # Get all connections for this tenant
         tenant_connections = []
-        with self._lock:
+        with self._sync_lock:
             for key in self.active_connections.keys():
                 if key.startswith(f"{tenant_id}:"):
                     _, user_id = key.split(":", 1)
@@ -271,7 +271,7 @@ class ConnectionManager:
     def is_connected(self, tenant_id: str, user_id: str) -> bool:
         """Check if a user is connected with thread safety"""
         key = f"{tenant_id}:{user_id}"
-        with self._lock:
+        with self._sync_lock:
             return key in self.active_connections
 
     async def _is_websocket_alive(self, websocket: WebSocket) -> bool:

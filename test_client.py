@@ -538,12 +538,12 @@ async def main():
         print("\n🎯 CLI-Style Voice Pipeline Client:")
         print("1. Test with audio file")
         print("2. CLI-style Real-time Pipeline (unlimited)")
-        print("3. CLI-style Real-time Pipeline (30s)")
-        print("4. CLI-style Real-time Pipeline (60s)")
-        print("5. CLI-style Real-time Pipeline (custom duration)")
-        print("6. Test text query with TTS")
-        print("7. Send ping (connection test)")
-        print("8. Exit")
+        # print("3. CLI-style Real-time Pipeline (30s)")
+        # print("4. CLI-style Real-time Pipeline (60s)")
+        # print("5. CLI-style Real-time Pipeline (custom duration)")
+        # print("6. Test text query with TTS")
+        print("3. Send ping (connection test)")
+        print("4. Exit")
         
         while True:
             try:
@@ -561,33 +561,13 @@ async def main():
                 
                 elif choice == "2":
                     await client.start_cli_style_pipeline()
+
                 
                 elif choice == "3":
-                    await client.start_cli_style_pipeline(30)
-                    
-                elif choice == "4":
-                    await client.start_cli_style_pipeline(60)
-                    
-                elif choice == "5":
-                    duration_str = input("Enter duration in seconds: ").strip()
-                    try:
-                        duration = int(duration_str)
-                        await client.start_cli_style_pipeline(duration)
-                    except ValueError:
-                        print("❌ Invalid duration")
-                
-                elif choice == "6":
-                    query = input("Enter your query: ").strip()
-                    if query:
-                        await client.test_query_with_tts(query)
-                    else:
-                        print("❌ Query cannot be empty")
-                
-                elif choice == "7":
                     await client.send_ping()
                     await asyncio.sleep(0.5)
                 
-                elif choice == "8":
+                elif choice == "4":
                     print("👋 Exiting...")
                     break
                 
@@ -612,9 +592,9 @@ async def main():
         client.cleanup()
 
 if __name__ == "__main__":
-    print("🎙️ CLI-Style WebSocket Voice Client")
+    print("🎙️ Style WebSocket Voice Client")
     print("=" * 60)
-    print("Output will match your CLI application format:")
+
     print("📝 Transcribing at HH:MM:SS")
     print("⏱ Transcription took X.XX seconds")  
     print("🧑 Generating response for: [query]")

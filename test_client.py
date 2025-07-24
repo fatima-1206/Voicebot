@@ -29,7 +29,7 @@ class VoicebotSTTClient:
         self.audio_queue = queue.Queue(maxsize=100)
         self.stop_event = threading.Event()
         
-        # Audio settings optimized for web-like streaming
+        # Audio settings optimized for backend processing
         self.sample_rate = 16000
         self.channels = 1
         self.chunk_duration_ms = 100
@@ -37,8 +37,8 @@ class VoicebotSTTClient:
         
         # Buffer management
         self.audio_buffer = np.array([], dtype=np.int16)
-        self.min_buffer_size = self.chunk_size * 2
-        self.max_buffer_size = self.chunk_size * 20
+        self.min_buffer_size = self.chunk_size * 10  # 1 second
+        self.max_buffer_size = self.chunk_size * 30  # 3 seconds
         
         # CLI-style tracking
         self.chunk_counter = 0
@@ -74,7 +74,7 @@ class VoicebotSTTClient:
             print("🔌 Disconnected from WebSocket")
     
     def audio_callback(self, indata, frames, time, status):
-        """Audio callback - mimics web MediaRecorder.ondataavailable"""
+        """Audio callback - mimics CLI audio capture"""
         if status:
             print(f"⚠️ Audio callback status: {status}")
         
@@ -87,8 +87,8 @@ class VoicebotSTTClient:
             except queue.Full:
                 print("⚠️ Audio queue full, dropping chunk")
     
-    async def start_media_recorder_like_streaming(self, duration=None):
-        """Start CLI-style continuous streaming"""
+    async def start_cli_style_pipeline(self, duration=None):
+        """Start CLI-style continuous streaming using correct backend message types"""
         if not self.websocket:
             print("❌ Not connected to WebSocket")
             return
@@ -104,6 +104,10 @@ class VoicebotSTTClient:
         print("=" * 60)
         
         try:
+            # Start continuous conversation mode (correct message type)
+            await self.start_continuous_conversation()
+            
+            # Start recording and streaming
             await self.start_recording()
             streaming_task = asyncio.create_task(
                 self.process_audio_chunks_continuously(duration)
@@ -116,6 +120,40 @@ class VoicebotSTTClient:
             print(f"❌ Error in streaming: {e}")
         finally:
             await self.stop_recording()
+            await self.stop_continuous_conversation()
+    
+    async def start_continuous_conversation(self):
+        """Start continuous conversation mode (correct message type)"""
+        if not self.websocket:
+            print("❌ Not connected to WebSocket")
+            return
+        
+        try:
+            message = {
+                "type": "start_continuous_conversation"
+            }
+            
+            await self.websocket.send(json.dumps(message))
+            print("✅ Continuous conversation mode started")
+            
+        except Exception as e:
+            print(f"❌ Error starting continuous conversation: {e}")
+    
+    async def stop_continuous_conversation(self):
+        """Stop continuous conversation mode"""
+        if not self.websocket:
+            return
+        
+        try:
+            message = {
+                "type": "stop_continuous_conversation"
+            }
+            
+            await self.websocket.send(json.dumps(message))
+            print("✅ Continuous conversation mode stopped")
+            
+        except Exception as e:
+            print(f"❌ Error stopping continuous conversation: {e}")
     
     async def start_recording(self):
         """Start audio recording"""
@@ -193,22 +231,17 @@ class VoicebotSTTClient:
                 audio_chunk = self.audio_queue.get(timeout=0.05)
                 self.audio_buffer = np.concatenate([self.audio_buffer, audio_chunk])
                 
-                # Check if we should send
+                # Send when we have enough audio (1-3 seconds like CLI chunks)
                 should_send = (
                     len(self.audio_buffer) >= self.min_buffer_size and
-                    (current_time - last_send_time) >= 0.2
+                    (current_time - last_send_time) >= 1.0  # Send every 1 second
                 ) or len(self.audio_buffer) >= self.max_buffer_size
                 
                 if should_send:
                     await self.send_audio_chunk(self.audio_buffer)
                     
-                    # Reset buffer with overlap
-                    overlap_size = self.chunk_size // 2
-                    if len(self.audio_buffer) > overlap_size:
-                        self.audio_buffer = self.audio_buffer[-overlap_size:]
-                    else:
-                        self.audio_buffer = np.array([], dtype=np.int16)
-                    
+                    # Clear buffer completely for next chunk
+                    self.audio_buffer = np.array([], dtype=np.int16)
                     last_send_time = current_time
                     self.chunk_counter += 1
             
@@ -222,22 +255,20 @@ class VoicebotSTTClient:
         print(f"✅ Audio processing complete")
     
     async def send_audio_chunk(self, audio_data, is_final=False):
-        """Send audio chunk via WebSocket"""
+        """Send audio chunk via WebSocket using correct message type"""
         try:
             audio_b64 = base64.b64encode(audio_data.tobytes()).decode('utf-8')
             
+            # Use the correct message type that backend expects
             message = {
                 "type": "continuous_audio_stream",
                 "audio": audio_b64,
                 "sample_rate": self.sample_rate,
                 "channels": self.channels,
-                "chunk_duration_ms": len(audio_data) * 1000 // self.sample_rate,
-                "is_final": is_final,
-                "tenant_id": self.tenant_id,
-                "user_id": self.user_id,
+                "conversation_mode": True,  # Enable conversation mode for auto-response
+                "auto_respond": True,       # Enable automatic responses
                 "tts_language": "en",
                 "voice": "en-US-JennyNeural",
-                "auto_respond": True,
                 "timestamp": int(time.time() * 1000)
             }
             
@@ -245,56 +276,6 @@ class VoicebotSTTClient:
             
         except Exception as e:
             print(f"❌ Error sending audio chunk: {e}")
-    
-    async def start_conversation_session(self):
-        """Start a conversation session"""
-        if not self.websocket:
-            print("❌ Not connected to WebSocket")
-            return
-        
-        try:
-            init_message = {
-                "type": "start_conversation_session",
-                "tenant_id": self.tenant_id,
-                "user_id": self.user_id,
-                "session_config": {
-                    "language": "en",
-                    "voice": "en-US-JennyNeural",
-                    "auto_respond": True,
-                    "use_rag": True,
-                    "stream_audio": True
-                },
-                "client_info": {
-                    "type": "cli_style_client",
-                    "sample_rate": self.sample_rate,
-                    "chunk_duration_ms": self.chunk_duration_ms
-                }
-            }
-            
-            await self.websocket.send(json.dumps(init_message))
-            print("✅ Conversation session initialized")
-            
-        except Exception as e:
-            print(f"❌ Error initializing session: {e}")
-    
-    async def end_conversation_session(self):
-        """End conversation session"""
-        if not self.websocket:
-            return
-        
-        try:
-            end_message = {
-                "type": "end_conversation_session",
-                "tenant_id": self.tenant_id,
-                "user_id": self.user_id,
-                "timestamp": int(time.time() * 1000)
-            }
-            
-            await self.websocket.send(json.dumps(end_message))
-            print("✅ Conversation session ended")
-            
-        except Exception as e:
-            print(f"❌ Error ending session: {e}")
     
     async def listen_for_responses(self):
         """Listen for responses from WebSocket - CLI-style output"""
@@ -317,22 +298,42 @@ class VoicebotSTTClient:
                     elif message_type == "query_with_tts_result":
                         await self.handle_query_response(data)
                         
+                    elif message_type == "query_with_tts_submitted":
+                        # Query was submitted for processing
+                        query_id = data.get('query_id', 'N/A')
+                        print(f"🔄 [QUERY] Processing query {query_id[:8]}...")
+                        
                     elif message_type == "audio_status":
                         await self.handle_audio_status(data)
                         
                     elif message_type == "audio_stream":
                         await self.handle_audio_stream(data)
                         
-                    elif message_type == "session_status":
-                        status = data.get('status', 'N/A')
-                        print(f"📱 [SESSION] {status}")
+                    elif message_type == "transcription_submitted":
+                        # Transcription was submitted for processing
+                        transcription_id = data.get('transcription_id', 'N/A')
+                        print(f"📝 Transcribing at {datetime.datetime.now().strftime('%H:%M:%S')}")
+                        
+                    elif message_type == "continuous_conversation_started":
+                        print("🔄 [SESSION] Continuous conversation started")
+                        
+                    elif message_type == "continuous_conversation_stopped":
+                        print("🔄 [SESSION] Continuous conversation stopped")
                         
                     elif message_type == "error":
                         error_msg = data.get('message', 'Unknown error')
                         print(f"\n❌ [ERROR] {error_msg}")
                         
+                    elif message_type == "ping":
+                        # Respond to ping
+                        await self.websocket.send(json.dumps({"type": "pong"}))
+                        
                     elif message_type == "pong":
                         print("🏓 Pong received")
+                        
+                    else:
+                        # Don't show unknown messages as errors, backend may send other types
+                        pass
                         
                 except json.JSONDecodeError:
                     print(f"❌ Invalid JSON received: {message}")
@@ -352,23 +353,20 @@ class VoicebotSTTClient:
         processing_time = data.get('processing_time', 0.0)
         
         if transcript:
-            # Format like CLI: [B001][0.00 - 3.45] transcript text
+            # Format like CLI output
             timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-            chunk_num = chunk_id.replace('chunk_', '') if 'chunk_' in chunk_id else chunk_id
-            
-            # Display like CLI
-            print(f"📝 Transcribing at {timestamp}")
+            chunk_num = chunk_id.split('_')[-1] if '_' in chunk_id else chunk_id
             
             # Log to file like CLI
             with open("transcription.txt", "a", encoding="utf-8") as f:
-                f.write(f"\n[B{chunk_num}] {transcript}\n")
+                f.write(f"\n[B{chunk_num[:3]}] {transcript}\n")
             
             print(f"⏱ Transcription took {processing_time:.2f} seconds")
             with open("transcription.txt", "a", encoding="utf-8") as f:
                 f.write(f"Transcription took {processing_time:.2f} seconds\n")
             
             # If this triggers a query, show the generating message
-            if len(transcript.split()) > 2:  # Only for meaningful transcripts
+            if len(transcript.split()) > 1:  # Only for meaningful transcripts
                 print(f"🧑 Generating response for: {transcript}")
                 with open("chat.txt", "a", encoding="utf-8") as f:
                     f.write(f"\n[{timestamp}] 🧑: {transcript}\n")
@@ -377,7 +375,9 @@ class VoicebotSTTClient:
         """Handle speech detection"""
         transcript = data.get('transcript', 'N/A')
         duration = data.get('duration', 0.0)
-        print(f"\n🗣️ [SPEECH] {transcript} ({duration:.1f}s)")
+        # Only show if it's a meaningful transcript (backend shows these)
+        if transcript and len(transcript.strip()) > 2:
+            print(f"\n🗣️ [SPEECH] {transcript} ({duration:.1f}s)")
     
     async def handle_query_response(self, data):
         """Handle query response - CLI format"""
@@ -391,7 +391,7 @@ class VoicebotSTTClient:
             f.write(f"[{timestamp}] 🤖: {response_text}\n")
         
         # Show TTS processing like CLI
-        print(f"🗣 Speaking: {response_text}")
+        print(f"🗣 Speaking: {response_text[:50]}{'...' if len(response_text) > 50 else ''}")
     
     async def handle_audio_status(self, data):
         """Handle TTS audio status"""
@@ -444,20 +444,19 @@ class VoicebotSTTClient:
             # Convert to 16-bit integers
             data = (data * 32767).astype(np.int16)
             
-            # Send in chunks like CLI processing
-            chunk_size = self.chunk_size * 5
-            total_chunks = len(data) // chunk_size + (1 if len(data) % chunk_size > 0 else 0)
+            # Send complete file as audio stream
+            audio_b64 = base64.b64encode(data.tobytes()).decode('utf-8')
             
-            for i in range(0, len(data), chunk_size):
-                chunk = data[i:i + chunk_size]
-                await self.send_audio_chunk(chunk, is_final=(i + chunk_size >= len(data)))
-                
-                chunk_num = i // chunk_size + 1
-                if chunk_num % 5 == 0 or chunk_num == total_chunks:
-                    print(f"📊 Sending chunk {chunk_num}/{total_chunks}")
-                
-                await asyncio.sleep(0.1)
+            message = {
+                "type": "audio_stream",
+                "audio": audio_b64,
+                "sample_rate": self.sample_rate,
+                "channels": self.channels,
+                "conversation_mode": False,  # Single file processing
+                "final": True
+            }
             
+            await self.websocket.send(json.dumps(message))
             print("✅ Audio file sent for transcription")
             
         except Exception as e:
@@ -479,12 +478,10 @@ class VoicebotSTTClient:
             message = {
                 "type": "query_with_tts",
                 "message": query,
-                "tenant_id": self.tenant_id,
-                "user_id": self.user_id,
-                "language": "en",
-                "voice": "en-US-JennyNeural",
                 "max_tokens": 500,
                 "temperature": 0.7,
+                "language": "en",
+                "voice": "en-US-JennyNeural",
                 "stream_audio": True
             }
             
@@ -558,34 +555,24 @@ async def main():
                         file_path = "sample.wav"
                     
                     if Path(file_path).exists():
-                        await client.start_conversation_session()
                         await client.send_audio_file(file_path)
-                        await client.end_conversation_session()
                     else:
                         print(f"❌ File not found: {file_path}")
                 
                 elif choice == "2":
-                    await client.start_conversation_session()
-                    await client.start_media_recorder_like_streaming()
-                    await client.end_conversation_session()
+                    await client.start_cli_style_pipeline()
                 
                 elif choice == "3":
-                    await client.start_conversation_session()
-                    await client.start_media_recorder_like_streaming(30)
-                    await client.end_conversation_session()
+                    await client.start_cli_style_pipeline(30)
                     
                 elif choice == "4":
-                    await client.start_conversation_session()
-                    await client.start_media_recorder_like_streaming(60)
-                    await client.end_conversation_session()
+                    await client.start_cli_style_pipeline(60)
                     
                 elif choice == "5":
                     duration_str = input("Enter duration in seconds: ").strip()
                     try:
                         duration = int(duration_str)
-                        await client.start_conversation_session()
-                        await client.start_media_recorder_like_streaming(duration)
-                        await client.end_conversation_session()
+                        await client.start_cli_style_pipeline(duration)
                     except ValueError:
                         print("❌ Invalid duration")
                 

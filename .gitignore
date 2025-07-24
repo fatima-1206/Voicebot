@@ -223,3 +223,5 @@ temp/
 run/
 var/run/
 context.txt
+chat.txt
+transcription.txt

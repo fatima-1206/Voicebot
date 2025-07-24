@@ -32,7 +32,7 @@ class VoicebotSTTClient:
         # Audio settings optimized for backend processing
         self.sample_rate = 16000
         self.channels = 1
-        self.chunk_duration_ms = 100
+        self.chunk_duration_ms = 300
         self.chunk_size = int(self.sample_rate * self.chunk_duration_ms / 1000)
         
         # Buffer management

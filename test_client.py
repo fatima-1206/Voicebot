@@ -32,7 +32,7 @@ class VoicebotSTTClient:
         # Audio settings optimized for backend processing
         self.sample_rate = 16000
         self.channels = 1
-        self.chunk_duration_ms = 100
+        self.chunk_duration_ms = 300
         self.chunk_size = int(self.sample_rate * self.chunk_duration_ms / 1000)
         
         # Buffer management
@@ -54,7 +54,38 @@ class VoicebotSTTClient:
         # Create chat log file like CLI
         with open("chat.txt", "w", encoding="utf-8") as f:
             f.write(f"=== Chat Session Started at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
-    
+        
+        self.input_device = None  # Add this line
+
+    def list_input_devices(self):
+        print("\nAvailable input devices:")
+        devices = sd.query_devices()
+        input_devices = [d for d in devices if d['max_input_channels'] > 0]
+        for idx, dev in enumerate(input_devices):
+            print(f"{idx}: {dev['name']} (ID: {dev['index']})")
+        return input_devices
+
+    def select_input_device(self):
+        input_devices = self.list_input_devices()
+        if not input_devices:
+            print("❌ No input devices found.")
+            return
+        try:
+            choice = int(input("Select input device by number (or press Enter for default): ") or -1)
+            if 0 <= choice < len(input_devices):
+                self.input_device = input_devices[choice]['index']
+                dev_info = sd.query_devices(self.input_device)
+                default_samplerate = int(dev_info['default_samplerate'])
+                print(f"✅ Selected device: {dev_info['name']}")
+                print(f"   Default sample rate: {default_samplerate}")
+                self.sample_rate = default_samplerate  # Set to device's default
+            else:
+                self.input_device = None
+                print("ℹ️ Using default input device.")
+        except Exception as e:
+            self.input_device = None
+            print(f"ℹ️ Using default input device. Error: {e}")
+
     async def connect(self):
         """Connect to the WebSocket"""
         try:
@@ -181,7 +212,8 @@ class VoicebotSTTClient:
                 callback=self.audio_callback,
                 blocksize=self.chunk_size,
                 dtype='float32',
-                latency='low'
+                latency='low',
+                device=self.input_device  # Add this line
             )
             self.audio_stream.start()
             print("✅ Audio capture started")
@@ -532,18 +564,17 @@ async def main():
         if not await client.connect():
             return
         
+        # Select input device
+        client.select_input_device()
+        
         # Start listening for responses in background
         listen_task = asyncio.create_task(client.listen_for_responses())
         
         print("\n🎯 CLI-Style Voice Pipeline Client:")
         print("1. Test with audio file")
         print("2. CLI-style Real-time Pipeline (unlimited)")
-        print("3. CLI-style Real-time Pipeline (30s)")
-        print("4. CLI-style Real-time Pipeline (60s)")
-        print("5. CLI-style Real-time Pipeline (custom duration)")
-        print("6. Test text query with TTS")
-        print("7. Send ping (connection test)")
-        print("8. Exit")
+        print("3. Send ping (connection test)")
+        print("4. Exit")
         
         while True:
             try:
@@ -561,33 +592,13 @@ async def main():
                 
                 elif choice == "2":
                     await client.start_cli_style_pipeline()
+
                 
                 elif choice == "3":
-                    await client.start_cli_style_pipeline(30)
-                    
-                elif choice == "4":
-                    await client.start_cli_style_pipeline(60)
-                    
-                elif choice == "5":
-                    duration_str = input("Enter duration in seconds: ").strip()
-                    try:
-                        duration = int(duration_str)
-                        await client.start_cli_style_pipeline(duration)
-                    except ValueError:
-                        print("❌ Invalid duration")
-                
-                elif choice == "6":
-                    query = input("Enter your query: ").strip()
-                    if query:
-                        await client.test_query_with_tts(query)
-                    else:
-                        print("❌ Query cannot be empty")
-                
-                elif choice == "7":
                     await client.send_ping()
                     await asyncio.sleep(0.5)
                 
-                elif choice == "8":
+                elif choice == "4":
                     print("👋 Exiting...")
                     break
                 
@@ -612,9 +623,9 @@ async def main():
         client.cleanup()
 
 if __name__ == "__main__":
-    print("🎙️ CLI-Style WebSocket Voice Client")
+    print("🎙️ Style WebSocket Voice Client")
     print("=" * 60)
-    print("Output will match your CLI application format:")
+
     print("📝 Transcribing at HH:MM:SS")
     print("⏱ Transcription took X.XX seconds")  
     print("🧑 Generating response for: [query]")

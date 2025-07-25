@@ -23,13 +23,20 @@ import threading
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
-
+from fastapi.middleware.cors import CORSMiddleware
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(title="Voicebot API", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Use ["*"] to allow all origins (not recommended in production)
+    allow_credentials=True,
+    allow_methods=["*"],    # Or restrict to specific methods like ["GET", "POST"]
+    allow_headers=["*"],    # Or restrict headers if needed
+)
 app.include_router(auth_router, prefix="/auth")
 app.include_router(documents_router, prefix="/documents")
 app.include_router(query_router, prefix="/query")

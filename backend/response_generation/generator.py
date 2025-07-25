@@ -82,12 +82,12 @@ def format_prompt(question: str, context: str) -> str:
     with open("context.txt", "a") as f:
         f.write(f"\n\nQuestion: {question}\n")
         f.write(f"Context: {context}\n")
-    return f"""You are an intelligent assistant capable of holding conversations. Your response should be concise, informative, and relevant to the user's questions. If the question is not related to the context, ignore the context. Answer in a smooth paragraph format. 
+    return f"""You are an intelligent assistant capable of holding conversations. Your response should be concise, informative, and relevant to the user's questions. Ignore the context if it  is not usefull. Answer briefly. 
+    Question: {question}
 
     Context:
     {context}
-    
-    Question: {question}
+
     Answer:"""
 
 def format_prompt_no_rag(question: str) -> str:
@@ -164,21 +164,23 @@ class LambdaLLM(LLM):
     def _llm_type(self) -> str:
         return "custom_llm"
 
-def generate_response(query: str, use_rag: bool = True, fallback_on_error: bool = True) -> str:
+
+
+
+
+
+def generate_response(
+    query: str,
+    use_rag: bool = True,
+    fallback_on_error: bool = True,
+    user_id: str = None,
+    tenant_id: str = None
+) -> str:
     """
-    Generate a response to the given query.
-    
-    Args:
-        query: The user's question
-        use_rag: Whether to use RAG or just LLM
-        fallback_on_error: Whether to fallback to non-RAG if RAG fails
-    
-    Returns:
-        Generated response string
+    Generate a response to the given query, filtered by user and tenant.
     """
     global rag_chain
-    
-    # If user explicitly doesn't want RAG, use LLM directly
+
     if not use_rag:
         print("🔄 Using LLM without RAG (user preference)")
         try:
@@ -187,28 +189,35 @@ def generate_response(query: str, use_rag: bool = True, fallback_on_error: bool 
         except Exception as e:
             print(f"❌ Error in LLM-only mode: {e}")
             return "I apologize, but I'm having technical difficulties and cannot generate a response right now."
-    
-    # Try RAG first
+
     try:
-        # Initialize if needed (for non-Celery usage)
         if rag_chain is None:
             initialize_rag_chain()
-        
+
         print("🔄 Using RAG pipeline")
-        result = rag_chain.invoke({"query": query})
-        if result and "result" in result:
-            response = profanity.censor(result["result"])
-            if response and response.strip():
-                return response
-            else:
-                raise ValueError("Empty response from RAG")
-        else:
-            raise ValueError("No result from RAG chain")
-            
+        # Manually retrieve docs, filter, and run LLM
+        retriever = rag_chain.retriever
+        docs = retriever.get_relevant_documents(query)
+
+        # This approach gives smarter responses in case the user hasn't uploaded any documents ---------------------------------------------
+        # Filter by tenant_id and user_id
+        # only use the docs that are uploaded by the user or are public
+        print("docs before filtering:", docs)
+        if docs:
+            docs = [
+            doc for doc in docs
+            if not doc.metadata  # Include docs with no metadata
+            or doc.metadata.get("is_public")
+            or doc.metadata.get("user_id") == user_id
+            ]
+
+        # Compose context from filtered docs
+        context = "\n".join([doc.page_content for doc in docs])
+        response = call_llm(query, context)
+        return profanity.censor(response) if response else "I apologize, but I couldn't generate a response."
+
     except Exception as e:
         print(f"❌ Error in RAG pipeline: {e}")
-        
-        # Fallback to LLM without RAG if enabled
         if fallback_on_error:
             print("🔄 Falling back to LLM without RAG")
             try:
@@ -222,6 +231,19 @@ def generate_response(query: str, use_rag: bool = True, fallback_on_error: bool 
                 return "I apologize, but I'm experiencing technical difficulties and cannot respond right now."
         else:
             return f"Error generating response with RAG: {str(e)}"
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 def generate_response_with_reranking(query: str, top_k: int = 2) -> str:
     """

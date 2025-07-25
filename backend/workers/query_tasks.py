@@ -21,7 +21,7 @@ def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id:
     with manage_gpu_memory():
         try:
             # Generate response with RAG options
-            response = generate_response(query, use_rag=use_rag, fallback_on_error=fallback_on_error)
+            response = generate_response(query, use_rag=use_rag, fallback_on_error=fallback_on_error,user_id=user_id, tenant_id=tenant_id)
             if response:
                 response = profanity.censor(response)  # Apply profanity filter
             

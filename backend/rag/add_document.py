@@ -1,8 +1,8 @@
 """
-    this file contains the code to add a document to the pre existing vector database.
-    It requires the faiss_db and hybrid_retriever to be constructed first.
-    The chunks made from the document will be added to the vector dtabase and the postgres database.
-    When the vector database is constructed, all chunks in the postgres database will be added to the vector database.
+This file contains the code to add a document to the pre-existing vector database.
+It requires the faiss_db and hybrid_retriever to be constructed first.
+The chunks made from the document will be added to the vector database and the postgres database.
+When the vector database is constructed, all chunks in the postgres database will be added to the vector database.
 """
 from langchain_core.documents import Document as LC_Document
 from langchain.text_splitter import TokenTextSplitter
@@ -41,26 +41,25 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
     Process an uploaded document and add it to both the vector database and PostgreSQL.
     """
     from backend.db.connection import SessionLocal
-    
     db = SessionLocal()  # Create session inside task
     temp_path = None
-    
+
     try:
         print(f"🔄 Task started for document: {filename} (doc_id: {doc_id})")
-        
+
         # Import and get fresh references to retrievers
         from backend.rag import retrieverconstruction
-        
+
         # Get or initialize retrievers (this will use caching now)
         faiss_db, hybrid_retriever = retrieverconstruction.get_retrievers()
-        
+
         if faiss_db is None:
             print("❌ Failed to initialize FAISS vector store")
             raise ValueError("Failed to initialize FAISS vector store")
-        
+
         print(f"✅ Retrieved FAISS DB: {faiss_db is not None}")
         print(f"✅ Retrieved Hybrid Retriever: {hybrid_retriever is not None}")
-        
+
         # Convert string UUIDs to UUID objects
         doc_id = UUID(doc_id) if isinstance(doc_id, str) else doc_id
         tenant_id = UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
@@ -82,40 +81,54 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         elif extension == ".txt":
             loader = TextLoader(temp_path, encoding="utf-8")
         else:
-            raise ValueError(f"Unsupported file format: {extension}")
+            print(f"⚠️ Unsupported file extension: {extension}")
+            raise ValueError(f"Unsupported file extension: {extension}")
 
-        # Step 3: Load and split
-        docs = loader.load()
+        # Step 3: Load and split document
+        loaded_docs = loader.load()
         chunks = []
-        for doc in docs:
-            for chunk in splitter.split_text(doc.page_content):
+        chunk_ids = []
+        chunk_data_for_db = []
+
+        for doc in loaded_docs:
+            for chunk_text in splitter.split_text(doc.page_content):
+                chunk_id = str(uuid4())
+                chunk_ids.append(chunk_id)
+
+                # Add chunk to FAISS list
                 chunks.append(
-                    LC_Document(page_content=chunk, metadata={
-                        "filename": filename,
-                        "tenant_id": str(tenant_id),
-                        "user_id": str(user_id),
-                        "doc_id": str(doc_id),
-                        "is_public": is_public,
-                        **doc.metadata
-                    })
+                    LC_Document(
+                        page_content=chunk_text,
+                        metadata={
+                            "chunk_id": chunk_id,
+                            "filename": filename,
+                            "tenant_id": str(tenant_id),
+                            "user_id": str(user_id),
+                            "doc_id": str(doc_id),
+                            "filetype": extension,
+                            "size": len(file_bytes),
+                            "is_public": is_public,
+                            **doc.metadata
+                        }
+                    )
                 )
+
+                # Store tuple for PostgreSQL insertion
+                chunk_data_for_db.append((chunk_id, chunk_text))
 
         print(f"📝 Created {len(chunks)} chunks from document")
 
         # Step 4: Add to FAISS vectorstore and update retrievers
         if len(chunks) > 0:
             print(f"📝 Adding {len(chunks)} chunks to FAISS vector store...")
-            faiss_db.add_documents(chunks)
-            
-            # Save the updated vectorstore
+            faiss_db.add_documents(chunks, ids=chunk_ids)
             retrieverconstruction.save_vectorstore(faiss_db)
             print("✅ Chunks added to FAISS successfully")
 
             # Step 5: Update retrievers (new FAISS + existing BM25)
             faiss_retriever, hybrid_retriever = retrieverconstruction.update_faiss_and_hybrid_retriever(faiss_db)
-            
+
             if faiss_retriever is not None and hybrid_retriever is not None:
-                # Update the global variables in the module
                 retrieverconstruction.faiss_db = faiss_db
                 retrieverconstruction.hybrid_retriever = hybrid_retriever
                 retrieverconstruction.faiss_retriever = faiss_retriever
@@ -125,18 +138,14 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         else:
             print("⚠️ Warning: No chunks created from document, skipping FAISS update")
 
-        # Step 8: Update document metadata in PostgreSQL (don't create new, update existing)
+        # Step 6: Update document metadata in PostgreSQL (don't create new, update existing)
         print(f"💾 Updating document metadata in PostgreSQL...")
-        
-        # Get the existing document record
         existing_doc = db.query(DB_Document).filter(DB_Document.id == doc_id).first()
         if existing_doc:
-            # Update the existing document
             existing_doc.path = temp_path
             existing_doc.status = "processed"
             print(f"✅ Updated existing document with ID: {existing_doc.id}")
         else:
-            # Fallback: create new document if it doesn't exist (shouldn't happen in normal flow)
             print(f"⚠️ Warning: Document with ID {doc_id} not found, creating new record")
             db_doc = DB_Document(
                 id=doc_id,
@@ -152,22 +161,24 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
             )
             db.add(db_doc)
             existing_doc = db_doc
-        
+
         db.flush()
 
-        # Step 9: Store chunks in database
+        # Step 7: Store chunks in database
         print(f"💾 Saving {len(chunks)} chunks to PostgreSQL...")
         chunks_saved = 0
-        for i, chunk in enumerate(chunks):
+        for chunk_id, chunk_text in chunk_data_for_db:
             try:
                 db_chunk = DB_Chunk(
+                    id=chunk_id,  # Set chunk_id explicitly
                     doc_id=existing_doc.id,
-                    text=chunk.page_content,
+                    text=chunk_text,
                 )
                 db.add(db_chunk)
                 chunks_saved += 1
             except Exception as chunk_error:
-                print(f"❌ Error saving chunk {i}: {chunk_error}")
+                print(f"❌ Error saving chunk {chunk_id}: {chunk_error}")
+
 
         # Commit all changes
         print("💾 Committing changes to database...")
@@ -188,6 +199,7 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         raise e
     
     finally:
+
         db.close()  # Always close the session
         # Clean up temp file and free memory
         if temp_path and os.path.exists(temp_path):
@@ -200,3 +212,6 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
+
+
+

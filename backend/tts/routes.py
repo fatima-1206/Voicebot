@@ -2,6 +2,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Union
 import os
+from fastapi import APIRouter, HTTPException, Depends
+from backend.auth.jwt_ import get_current_user, UserTokenData
 
 router = APIRouter()
 
@@ -39,7 +41,9 @@ class TTSTaskStatusResponse(BaseModel):
     info: Optional[dict]
 
 @router.post("/convert", response_model=Union[TTSSyncResponse, TTSAsyncResponse])
-async def convert_text_to_speech(request: TTSRequest):
+async def convert_text_to_speech(request: TTSRequest,
+                                current_user: UserTokenData = Depends(get_current_user)
+                                 ):
     """
     Convert text to speech either synchronously or asynchronously
     """
@@ -94,7 +98,8 @@ async def convert_text_to_speech(request: TTSRequest):
         raise HTTPException(status_code=500, detail=f"TTS conversion failed: {str(e)}")
 
 @router.get("/task/{task_id}", response_model=TTSTaskStatusResponse)
-async def get_task_status(task_id: str):
+async def get_task_status(task_id: str,
+                                current_user: UserTokenData = Depends(get_current_user)):
     """
     Get the status of an asynchronous TTS task
     """
@@ -116,7 +121,8 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to get task status: {str(e)}")
 
 @router.get("/download/{filename}")
-async def download_audio_file(filename: str):
+async def download_audio_file(filename: str,
+                                current_user: UserTokenData = Depends(get_current_user)):
     """
     Download generated audio file
     """

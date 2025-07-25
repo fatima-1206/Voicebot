@@ -570,38 +570,19 @@ async def main():
         # Start listening for responses in background
         listen_task = asyncio.create_task(client.listen_for_responses())
         
-        print("\n🎯 CLI-Style Voice Pipeline Client:")
-        print("1. Test with audio file")
-        print("2. CLI-style Real-time Pipeline (unlimited)")
-        print("3. Send ping (connection test)")
-        print("4. Exit")
+        print("\n🎯Voicebot Client:")
+        print("1. CLI-style Real-time Pipeline (unlimited)")
+        print("2. Exit")
         
         while True:
             try:
                 choice = input("\nEnter your choice (1-8): ").strip()
                 
                 if choice == "1":
-                    file_path = input("Enter audio file path (or press Enter for 'sample.wav'): ").strip()
-                    if not file_path:
-                        file_path = "sample.wav"
-                    
-                    if Path(file_path).exists():
-                        await client.send_audio_file(file_path)
-                    else:
-                        print(f"❌ File not found: {file_path}")
-                
-                elif choice == "2":
                     await client.start_cli_style_pipeline()
-
-                
-                elif choice == "3":
-                    await client.send_ping()
-                    await asyncio.sleep(0.5)
-                
-                elif choice == "4":
+                elif choice == "2":
                     print("👋 Exiting...")
                     break
-                
                 else:
                     print("❌ Invalid choice, please try again")
                     

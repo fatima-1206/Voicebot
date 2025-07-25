@@ -48,12 +48,12 @@ class VoicebotSTTClient:
         self.executor = ThreadPoolExecutor(max_workers=2)
         
         # Create transcription log file like CLI
-        with open("transcription.txt", "w", encoding="utf-8") as f:
-            f.write(f"=== Transcription Session Started at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        # with open("transcription.txt", "w", encoding="utf-8") as f:
+        #     f.write(f"=== Transcription Session Started at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         
-        # Create chat log file like CLI
-        with open("chat.txt", "w", encoding="utf-8") as f:
-            f.write(f"=== Chat Session Started at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        # # Create chat log file like CLI
+        # with open("chat.txt", "w", encoding="utf-8") as f:
+        #     f.write(f"=== Chat Session Started at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         
         self.input_device = None  # Add this line
 
@@ -390,18 +390,18 @@ class VoicebotSTTClient:
             chunk_num = chunk_id.split('_')[-1] if '_' in chunk_id else chunk_id
             
             # Log to file like CLI
-            with open("transcription.txt", "a", encoding="utf-8") as f:
-                f.write(f"\n[B{chunk_num[:3]}] {transcript}\n")
+            # with open("transcription.txt", "a", encoding="utf-8") as f:
+            #     f.write(f"\n[B{chunk_num[:3]}] {transcript}\n")
             
             print(f"⏱ Transcription took {processing_time:.2f} seconds")
-            with open("transcription.txt", "a", encoding="utf-8") as f:
-                f.write(f"Transcription took {processing_time:.2f} seconds\n")
+            # with open("transcription.txt", "a", encoding="utf-8") as f:
+            #     f.write(f"Transcription took {processing_time:.2f} seconds\n")
             
             # If this triggers a query, show the generating message
             if len(transcript.split()) > 1:  # Only for meaningful transcripts
                 print(f"🧑 Generating response for: {transcript}")
-                with open("chat.txt", "a", encoding="utf-8") as f:
-                    f.write(f"\n[{timestamp}] 🧑: {transcript}\n")
+                # with open("chat.txt", "a", encoding="utf-8") as f:
+                #     f.write(f"\n[{timestamp}] 🧑: {transcript}\n")
     
     async def handle_speech_detected(self, data):
         """Handle speech detection"""
@@ -419,8 +419,8 @@ class VoicebotSTTClient:
         
         # Display like CLI
         print(f"🤖 Response: {response_text}")
-        with open("chat.txt", "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] 🤖: {response_text}\n")
+        # with open("chat.txt", "a", encoding="utf-8") as f:
+        #     f.write(f"[{timestamp}] 🤖: {response_text}\n")
         
         # Show TTS processing like CLI
         print(f"🗣 Speaking: {response_text[:50]}{'...' if len(response_text) > 50 else ''}")
@@ -504,8 +504,8 @@ class VoicebotSTTClient:
             # Show like CLI
             timestamp = datetime.datetime.now().strftime('%H:%M:%S')
             print(f"🧑 Generating response for: {query}")
-            with open("chat.txt", "a", encoding="utf-8") as f:
-                f.write(f"\n[{timestamp}] 🧑: {query}\n")
+            # with open("chat.txt", "a", encoding="utf-8") as f:
+            #     f.write(f"\n[{timestamp}] 🧑: {query}\n")
             
             message = {
                 "type": "query_with_tts",

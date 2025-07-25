@@ -127,8 +127,9 @@ def load_documents_from_postgres(db: Session = None, tenant_id: str = None):
         # Query to get all processed documents, optionally filtered by tenant_id
         query = db.query(DB_Document).filter(DB_Document.status == 'processed')
         
-        if tenant_id:
-            query = query.filter(DB_Document.tenant_id == tenant_id)
+        # shouldn't put a filter here since all tenants get one shared retriever
+        # if tenant_id:
+        #     query = query.filter(DB_Document.tenant_id == tenant_id)
         
         documents = query.all()
         

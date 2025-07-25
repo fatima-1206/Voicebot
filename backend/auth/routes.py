@@ -165,4 +165,18 @@ def get_join_code(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return {"join_code_hash": tenant.join_code_hash}
-# ...existing code...
+
+def get_join_code(
+    user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admins only")
+    tenant = db.query(models.Tenant).filter_by(id=user.tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {"tenant_id": tenant.id}
+
+
+
+

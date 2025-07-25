@@ -126,11 +126,7 @@ def load_documents_from_postgres(db: Session = None, tenant_id: str = None):
         
         # Query to get all processed documents, optionally filtered by tenant_id
         query = db.query(DB_Document).filter(DB_Document.status == 'processed')
-        
-        # shouldn't put a filter here since all tenants get one shared retriever
-        # if tenant_id:
-        #     query = query.filter(DB_Document.tenant_id == tenant_id)
-        
+     
         documents = query.all()
         
         postgres_docs_count = 0
@@ -139,7 +135,6 @@ def load_documents_from_postgres(db: Session = None, tenant_id: str = None):
         for doc in documents:
             # Get chunks for this document using the foreign key relationship
             chunks = db.query(DB_Chunk).filter(DB_Chunk.doc_id == doc.id).all()
-            
             for chunk in chunks:
                 # Create metadata for the chunk
                 metadata = {
@@ -155,6 +150,7 @@ def load_documents_from_postgres(db: Session = None, tenant_id: str = None):
                     "chunk_id": str(chunk.id),
                     "language": chunk.language
                 }
+                # print(metadata)
                 
                 # Create langchain Document and append to all_documents
                 lc_document = Document(
@@ -355,7 +351,7 @@ def load_vectorstore():
 
 
 
-def construct_retrievers(include_postgres=True, tenant_id=None):
+def construct_retrievers(include_postgres=True, tenant_id=None, user_id=None):
     """
     Construct the retrievers for the loaded documents.
     This function initializes the FAISS and BM25 retrievers.
@@ -363,6 +359,7 @@ def construct_retrievers(include_postgres=True, tenant_id=None):
     Args:
         include_postgres: Whether to include documents from PostgreSQL
         tenant_id: Filter PostgreSQL documents by tenant_id (optional)
+        user_id: Filter PostgreSQL documents by user_id (optional)
     """
     global db_initialized, faiss_db, hybrid_retriever, faiss_retriever, bm25_retriever
 
@@ -421,6 +418,7 @@ def construct_retrievers(include_postgres=True, tenant_id=None):
     unload_documents_and_embeddings(clear_faiss=False)
     
     return faiss_db, hybrid_retriever  # Fix: Consistent return signature
+
 def save_vectorstore(faiss_db):
     if not os.path.exists(VECSTORE_PATH):
         os.makedirs(VECSTORE_PATH)

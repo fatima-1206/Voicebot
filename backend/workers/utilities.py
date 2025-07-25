@@ -35,7 +35,7 @@ def initialize_models():
         # Initialize Whisper model
         device = "cuda" if torch.cuda.is_available() else "cpu"
         compute_type = "float16" if device == "cuda" else "int8"
-        model = WhisperModel("large-v3", device=device, compute_type=compute_type)
+        model = WhisperModel("medium", device=device, compute_type=compute_type)
         logger.info(f"✅ Whisper model initialized on {device}")
     except Exception as e:
         logger.error(f"❌ Whisper model initialization failed: {e}")

@@ -188,13 +188,13 @@ async def update_document_visibility_endpoint(
         raise HTTPException(status_code=403, detail="You don't have permission to modify this document")
     
     # If the visibility is already the same, no need to process
-    if document.is_public == is_public:
-        return {
-            "message": f"Document '{document.filename}' is already {'public' if is_public else 'private'}",
-            "doc_id": str(document.id),
-            "filename": document.filename,
-            "is_public": is_public
-        }
+    # if document.is_public == is_public:
+    #     return {
+    #         "message": f"Document '{document.filename}' is already {'public' if is_public else 'private'}",
+    #         "doc_id": str(document.id),
+    #         "filename": document.filename,
+    #         "is_public": is_public
+    #     }
     
     # Update the database immediately for quick response
     document.is_public = is_public
@@ -204,7 +204,8 @@ async def update_document_visibility_endpoint(
     update_document_visibility.delay(
         doc_id=str(document.id),
         is_public=is_public,
-        tenant_id=str(current_user.tenant_id)
+        tenant_id=str(current_user.tenant_id),
+        user_id=str(current_user.user_id)  # Add user_id for visibility update
     )
     
     return {

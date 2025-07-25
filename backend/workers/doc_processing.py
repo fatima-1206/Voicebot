@@ -46,7 +46,7 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
 
 
 @celery_app.task(name='update_document_visibility')
-def update_document_visibility(doc_id: str, is_public: bool, tenant_id: str):
+def update_document_visibility(doc_id: str, is_public: bool, tenant_id: str, user_id: str):
     """Update document visibility"""
     print(f"🔄 [DOC] Updating visibility for {doc_id}")
     
@@ -68,10 +68,9 @@ def update_document_visibility(doc_id: str, is_public: bool, tenant_id: str):
             # Rebuild retrievers
             try:
                 from backend.rag import retrieverconstruction
-                retrieverconstruction.clear_cache()
+                # retrieverconstruction.clear_cache()
                 retrieverconstruction.construct_retrievers(
-                    include_postgres=True,
-                    force_rebuild=True
+                    include_postgres=True, tenant_id=tenant_id, user_id=user_id
                 )
             except Exception as e:
                 print(f"❌ Error rebuilding retrievers: {e}")

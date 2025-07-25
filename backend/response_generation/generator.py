@@ -202,34 +202,15 @@ def generate_response(
         # This approach gives smarter responses in case the user hasn't uploaded any documents ---------------------------------------------
         # Filter by tenant_id and user_id
         # only use the docs that are uploaded by the user or are public
-       
-        # if tenant_id and docs:
-        #     docs = [doc for doc in docs if doc.metadata.get("tenant_id") == tenant_id or doc.metadata.get("is_public") == True]
-        # if user_id and docs:
-        #     docs = [doc for doc in docs if doc.metadata.get("tenant_id") == tenant_id or doc.metadata.get("is_public") == True]
-
-        # This approach makes sure that documents are always retrieved though they may not be relevant to the user
-
-        if tenant_id and docs:
+        print("docs before filtering:", docs)
+        if docs:
             docs = [
             doc for doc in docs
-            if (
-                doc.metadata.get("tenant_id") == tenant_id
-                or doc.metadata.get("is_public") == True
-                or "tenant_id" not in doc.metadata
-                or "is_public" not in doc.metadata
-            )
+            if not doc.metadata  # Include docs with no metadata
+            or doc.metadata.get("is_public")
+            or doc.metadata.get("user_id") == user_id
             ]
-        if user_id and docs:
-            docs = [
-            doc for doc in docs
-            if (
-                doc.metadata.get("tenant_id") == tenant_id
-                or doc.metadata.get("is_public") == True
-                or "tenant_id" not in doc.metadata
-                or "is_public" not in doc.metadata
-            )
-            ]
+
         # Compose context from filtered docs
         context = "\n".join([doc.page_content for doc in docs])
         response = call_llm(query, context)

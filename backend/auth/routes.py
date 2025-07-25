@@ -7,6 +7,8 @@ from .schemas import *
 from .utils import hash_password, verify_password
 from .jwt_ import create_access_token
 from fastapi.security import OAuth2PasswordBearer
+from fastapi import Depends, HTTPException
+from .jwt_ import get_current_user  # Assuming this returns the user dict from JWT
 
 router = APIRouter()
 
@@ -138,3 +140,29 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         "is_admin": user.is_admin
     })
     return TokenResponse(access_token=token)
+
+
+def is_admin(user: dict = Depends(get_current_user)):
+    if not user.is_admin:
+        return False
+    return True
+
+# Usage in a route
+@router.get("/is_admin")
+def admin_route(is_admin: bool = Depends(is_admin)):
+    return {"is_admin": is_admin}
+
+# ...existing code...
+
+@router.get("/admin/join-code")
+def get_join_code(
+    user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admins only")
+    tenant = db.query(models.Tenant).filter_by(id=user.tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {"join_code_hash": tenant.join_code_hash}
+# ...existing code...

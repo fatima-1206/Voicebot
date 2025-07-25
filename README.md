@@ -51,7 +51,11 @@ To use the client, start the app using the start.sh as stated above and then run
 
 ```python test_client.py```
 
+You will need to replace the `localhost` with `172.17.180.124` when access the test client from an environment different to the server.
+
+
 The text query response will be printed on the terminal and the audio output will be saved in the folder `backend/rag/temp_audioFiles` with a name like `tts_{timestamp}_{task_id}.wav`.
+You can paste the given file name in the fast api tts/download endpoint to access the response remotely.
 
 **Note**: If the program does not stop after pressing Ctrl+C, open a new terminal in the same directory and run the following command:
 

@@ -202,7 +202,6 @@ def generate_response(
         # This approach gives smarter responses in case the user hasn't uploaded any documents ---------------------------------------------
         # Filter by tenant_id and user_id
         # only use the docs that are uploaded by the user or are public
-        print("docs before filtering:", docs)
         if docs:
             docs = [
             doc for doc in docs

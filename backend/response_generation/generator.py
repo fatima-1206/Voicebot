@@ -15,7 +15,10 @@ rag_chain = None
 device = None
 
 profanity.load_censor_words()
-
+# Load config file
+with open("config.json", "r") as f:
+    config = json.load(f)
+max_new_tokens = config.get("max_new_tokens", 512)  # Default to 512 if not set
 # ---------------- Setup ------------------
 def initialize_model():
     """Initialize model and tokenizer - called by Celery worker or on first use"""
@@ -82,7 +85,8 @@ def format_prompt(question: str, context: str) -> str:
     with open("context.txt", "a") as f:
         f.write(f"\n\nQuestion: {question}\n")
         f.write(f"Context: {context}\n")
-    return f"""You are an intelligent assistant capable of holding conversations. Your response should be concise, informative, and relevant to the user's questions. Ignore the context if it  is not usefull. Answer briefly. 
+    return f"""You are an intelligent assistant capable of holding conversations. Your response should be concise, informative, and relevant to the user's questions. Ignore the context if it  is not usefull. Answer within {max_new_tokens*4-100} characters.
+
     Question: {question}
 
     Context:

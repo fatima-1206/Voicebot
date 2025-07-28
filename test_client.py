@@ -320,7 +320,7 @@ class VoicebotSTTClient:
                 "conversation_mode": True,  # Enable conversation mode for auto-response
                 "auto_respond": True,       # Enable automatic responses
                 "tts_language": "en",
-                "voice": "en-US-JennyNeural",
+                "voice": "Fritz-PlayAI",
                 "timestamp": int(time.time() * 1000)
             }
             

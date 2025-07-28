@@ -126,7 +126,8 @@ class VoicebotSTTClient:
         payload = {
             "tenant_id": self.tenant_id,
             "user_id": self.user_id,
-            "query": query
+            "query": query,
+            "use_rag":self.rag
         }
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         async with httpx.AsyncClient() as client:
@@ -596,7 +597,8 @@ async def main():
         print("1. Voicecall")
         print("2. Text Query")
         print("3. Exit")
-        print("4. turn off rag for voicecall")        
+        print("4. turn rag off")       
+        print("5. turn rag on") 
         while True:
             try:
                 choice = input("\nEnter your choice (1-4): ").strip()
@@ -611,6 +613,9 @@ async def main():
                 elif choice == "4":
                     client.rag = False
                     print("ℹ️ RAG processing disabled for voicecall")
+                elif choice == "5":
+                    client.rag = True
+                    print("ℹ️ RAG processing enabled for voicecall")
                 else:
                     print("❌ Invalid choice, please try again")
                     

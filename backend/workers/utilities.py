@@ -195,6 +195,7 @@ def safe_redis_publish(channel: str, message: dict, max_retries: int = 3) -> boo
     """Safely publish message to Redis with error handling"""
     try:
         message_str = json.dumps(message)
+        # message_str = message
         return redis_client.publish(channel, message_str, max_retries=max_retries)
     except Exception as e:
         logger.error(f"❌ Failed to publish to Redis channel {channel}: {e}")
@@ -233,8 +234,10 @@ def notify_text_response_ready(tenant_id: str, user_id: str, query_id: str, quer
             "response": response,
             "timestamp": datetime.now().isoformat()
         }
-        
-        success = safe_redis_publish(f"ws:{tenant_id}:{user_id}", message)
+        # Serialize message to JSON string
+        # message_str = json.dumps(message)
+        message_str = message
+        success = safe_redis_publish(f"ws:{tenant_id}:{user_id}", message_str)
         if success:
             logger.info(f"📡 [WS] Text response sent for query {query_id[:8]}")
         else:
@@ -245,7 +248,7 @@ def notify_text_response_ready(tenant_id: str, user_id: str, query_id: str, quer
     except Exception as e:
         logger.error(f"❌ Failed to notify text response: {e}")
         return False
-
+    
 def notify_error(tenant_id: str, user_id: str, query_id: str, error: str) -> bool:
     """Notify error via WebSocket with improved error handling"""
     try:

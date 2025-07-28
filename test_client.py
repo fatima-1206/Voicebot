@@ -15,7 +15,7 @@ import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor
 import datetime
-
+import httpx
 class VoicebotSTTClient:
     def __init__(self, host="localhost", port=8000, tenant_id="d7acb015-1ce6-451d-b253-d7455070b4b4", user_id="f00ce248-5a04-41f5-97ca-828d24ea265a"):
         self.host = host
@@ -117,7 +117,32 @@ class VoicebotSTTClient:
                 self.audio_queue.put_nowait(audio_int16)
             except queue.Full:
                 print("⚠️ Audio queue full, dropping chunk")
-    
+
+    async def submit_text_query(self):
+        query = input("Enter your text query: ").strip()
+        self.api_url = f"http://{self.host}:{self.port}"
+        self.token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiZjAwY2UyNDgtNWEwNC00MWY1LTk3Y2EtODI4ZDI0ZWEyNjVhIiwidGVuYW50X2lkIjoiZDdhY2IwMTUtMWNlNi00NTFkLWIyNTMtZDc0NTUwNzBiNGI0IiwiaXNfYWRtaW4iOnRydWUsImV4cCI6MTc1NDI4OTgyN30.TEmmPc0siGvuhwRqGRx4OIVZVfMj_h0L6-SyEn3g6zk"
+        if not query:
+            print("❌ Query cannot be empty")
+            return
+        url = f"{self.api_url}/query/submit"
+        payload = {
+            "tenant_id": self.tenant_id,
+            "user_id": self.user_id,
+            "query": query
+        }
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(url, json=payload, headers=headers)
+                print(f"✅ Sent text-to-text request: {response.status_code}")
+            except Exception as e:
+                print(f"❌ Error sending text-to-text request: {e}")
+                return
+
+
+
+
     async def start_cli_style_pipeline(self, duration=None):
         """Start CLI-style continuous streaming using correct backend message types"""
         if not self.websocket:
@@ -312,17 +337,27 @@ class VoicebotSTTClient:
     async def listen_for_responses(self):
         """Listen for responses from WebSocket - CLI-style output"""
         if not self.websocket:
+            print("❌ Not connected to WebSocket")
             return
         
         try:
             async for message in self.websocket:
                 try:
                     data = json.loads(message)
-                    message_type = data.get("type", "unknown")
-                    
+                    try:
+                        data = json.loads(message)
+                        if isinstance(data, dict):
+                            message_type = data.get("type", "unknown")
+                        else:
+                            print(f"❌ Received non-dict message: {data}")
+                            message_type = "unknown"
+                    except Exception as e:
+                        print(f"❌ Error decoding message: {e}")
+                        message_type = "unknown"
                     # Handle different message types with CLI-style formatting
                     if message_type == "transcription_result":
                         await self.handle_transcription_result(data)
+                    
                         
                     elif message_type == "speech_detected":
                         await self.handle_speech_detected(data)
@@ -340,7 +375,8 @@ class VoicebotSTTClient:
                         
                     elif message_type == "audio_stream":
                         await self.handle_audio_stream(data)
-                        
+                    elif message_type == "text_response":
+                        print(f"🤖 Response: {data}")
                     elif message_type == "transcription_submitted":
                         # Transcription was submitted for processing
                         transcription_id = data.get('transcription_id', 'N/A')
@@ -353,8 +389,12 @@ class VoicebotSTTClient:
                         print("🔄 [SESSION] Continuous conversation stopped")
                         
                     elif message_type == "error":
-                        error_msg = data.get('message', 'Unknown error')
-                        print(f"\n❌ [ERROR] {error_msg}")
+                        if data.type is str:
+                            print(f"❌ [ERROR] {data}")
+                        else:
+                            # Handle structured error messages
+                            error_msg = data.get('message', 'Unknown error')
+                            print(f"\n❌ [ERROR] {error_msg}")
                         
                     elif message_type == "ping":
                         # Respond to ping
@@ -572,7 +612,8 @@ async def main():
         
         print("\n🎯Voicebot Client:")
         print("1. CLI-style Real-time Pipeline (unlimited)")
-        print("2. Exit")
+        print("2. Text Query")
+        print("3. Exit")
         
         while True:
             try:
@@ -581,6 +622,8 @@ async def main():
                 if choice == "1":
                     await client.start_cli_style_pipeline()
                 elif choice == "2":
+                    await client.submit_text_query()
+                elif choice == "3":
                     print("👋 Exiting...")
                     break
                 else:

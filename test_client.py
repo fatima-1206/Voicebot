@@ -18,9 +18,11 @@ import datetime
 import httpx
 class VoicebotSTTClient:
     # replace localhost with 172.17.180.124 when running away from the server
-    def __init__(self, host="localhost", port=8000, tenant_id="d7acb015-1ce6-451d-b253-d7455070b4b4", user_id="f00ce248-5a04-41f5-97ca-828d24ea265a"):
+    def __init__(self, host="localhost", port=8000, 
+                 tenant_id="cf670545-292c-49cc-af6c-798e7c786070",user_id="f19c393f-a23b-4337-88fa-71ca01733d62"):
         self.host = host
         self.port = port
+        self.token=None
         self.tenant_id = tenant_id
         self.user_id = user_id
         self.websocket_url = f"ws://{host}:{port}/ws/{tenant_id}/{user_id}"
@@ -30,6 +32,8 @@ class VoicebotSTTClient:
         self.audio_queue = queue.Queue(maxsize=100)
         self.stop_event = threading.Event()
         
+        self.rag=True
+
         # Audio settings optimized for backend processing
         self.sample_rate = 16000
         self.channels = 1
@@ -113,7 +117,8 @@ class VoicebotSTTClient:
     async def submit_text_query(self):
         query = input("Enter your text query: ").strip()
         self.api_url = f"http://{self.host}:{self.port}"
-        self.token = input("Enter your API token: ").strip()
+        if not self.token:
+            self.token = input("Enter your API token: ").strip()
         if not query:
             print("❌ Query cannot be empty")
             return
@@ -280,11 +285,8 @@ class VoicebotSTTClient:
                 audio_chunk = self.audio_queue.get(timeout=0.05)
                 self.audio_buffer = np.concatenate([self.audio_buffer, audio_chunk])
                 
-                # Send when we have enough audio (1-3 seconds like CLI chunks)
-                should_send = (
-                    len(self.audio_buffer) >= self.min_buffer_size and
-                    (current_time - last_send_time) >= 1.0  # Send every 1 second
-                ) or len(self.audio_buffer) >= self.max_buffer_size
+                # Send when we have enough audio
+                should_send = len(self.audio_buffer) >= self.chunk_size
                 
                 if should_send:
                     await self.send_audio_chunk(self.audio_buffer)
@@ -311,6 +313,7 @@ class VoicebotSTTClient:
             # Use the correct message type that backend expects
             message = {
                 "type": "continuous_audio_stream",
+                "rag": self.rag,  # Enable RAG processing
                 "audio": audio_b64,
                 "sample_rate": self.sample_rate,
                 "channels": self.channels,
@@ -338,7 +341,7 @@ class VoicebotSTTClient:
                     data = json.loads(message)
                     try:
                         data = json.loads(message)
-                        if isinstance(data, dict):
+                        if isinstance(data, dict) and "type" in data:
                             message_type = data.get("type", "unknown")
                         else:
                             print(f"❌ Received non-dict message: {data}")
@@ -349,8 +352,6 @@ class VoicebotSTTClient:
                     # Handle different message types with CLI-style formatting
                     if message_type == "transcription_result":
                         await self.handle_transcription_result(data)
-                    
-                        
                     elif message_type == "speech_detected":
                         await self.handle_speech_detected(data)
                         
@@ -448,7 +449,6 @@ class VoicebotSTTClient:
        
         # Show TTS processing like CLI
         print(f"🗣 Speaking: {response_text[:50]}{'...' if len(response_text) > 50 else ''}")
-    
     async def handle_audio_status(self, data):
         """Handle TTS audio status"""
         status = data.get('status', 'N/A')
@@ -593,13 +593,13 @@ async def main():
         listen_task = asyncio.create_task(client.listen_for_responses())
         
         print("\n🎯Voicebot Client:")
-        print("1. CLI-style Real-time Pipeline (unlimited)")
+        print("1. Voicecall")
         print("2. Text Query")
         print("3. Exit")
-        
+        print("4. turn off rag for voicecall")        
         while True:
             try:
-                choice = input("\nEnter your choice (1-8): ").strip()
+                choice = input("\nEnter your choice (1-4): ").strip()
                 
                 if choice == "1":
                     await client.start_cli_style_pipeline()
@@ -608,6 +608,9 @@ async def main():
                 elif choice == "3":
                     print("👋 Exiting...")
                     break
+                elif choice == "4":
+                    client.rag = False
+                    print("ℹ️ RAG processing disabled for voicecall")
                 else:
                     print("❌ Invalid choice, please try again")
                     

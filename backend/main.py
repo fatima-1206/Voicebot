@@ -256,7 +256,8 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
                 buffer_key=key,
                 tts_language=data.get("tts_language", "en"),
                 voice=data.get("voice", "en-US-JennyNeural"),
-                auto_respond=data.get("auto_respond", True)
+                auto_respond=data.get("auto_respond", True),
+                use_rag=data.get("rag", True) # Enable RAG processing if not specified
             )
     
     except Exception as e:

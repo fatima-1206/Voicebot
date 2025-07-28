@@ -331,7 +331,7 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
 @celery_app.task(name='process_continuous_audio', bind=True)
 def process_continuous_audio_task(self, audio_bytes: bytes, user_id: str, tenant_id: str, 
                                  buffer_key: str, tts_language: str = "en", 
-                                 voice: str = "en-US-JennyNeural", auto_respond: bool = True):
+                                 voice: str = "en-US-JennyNeural", auto_respond: bool = True, use_rag: bool = True):
     """
     Process continuous audio stream with server-side VAD
     Detects speech segments and triggers STT+RAG+TTS pipeline
@@ -389,7 +389,7 @@ def process_continuous_audio_task(self, audio_bytes: bytes, user_id: str, tenant
             # Process this speech segment immediately
             segment_result = process_speech_segment(
                 speech_bytes, user_id, chunk_id, tenant_id,
-                tts_language, voice, auto_respond
+                tts_language, voice, auto_respond, use_rag=use_rag
             )
             
             processed_segments.append(segment_result)
@@ -406,7 +406,7 @@ def process_continuous_audio_task(self, audio_bytes: bytes, user_id: str, tenant
 
 
 def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str, 
-                         tenant_id: str, tts_language: str, voice: str, auto_respond: bool):
+                         tenant_id: str, tts_language: str, voice: str, auto_respond: bool, use_rag: bool = True):
     """
     Process a single detected speech segment through STT+RAG+TTS
     """
@@ -473,7 +473,8 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
                 voice=voice,
                 stream_audio=True,
                 max_tokens=300,  # Shorter responses for conversation
-                temperature=0.7
+                temperature=0.7,
+                use_rag=use_rag
             )
             
             return {

@@ -368,36 +368,6 @@ def get_db():
 def root():
     return {"message": "Voicebot API is running!", "timestamp": datetime.now().isoformat()}
 
-@app.get("/health")
-async def health_check():
-    """Comprehensive health check endpoint"""
-    websocket_health = await manager.health_check()
-    audio_buffer_stats = audio_buffer_manager.get_stats()
-    redis_stats = redis_listener.get_stats()
-    
-    return {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "websockets": websocket_health,
-        "audio_buffers": audio_buffer_stats,
-        "redis": redis_stats
-    }
-
-@app.get("/metrics")
-async def get_metrics():
-    """Get system metrics"""
-    return {
-        "websockets": {
-            "active_connections": manager.get_connection_count(),
-            "total_created": manager.metrics.connections_created,
-            "total_closed": manager.metrics.connections_closed,
-            "successful_sends": manager.metrics.successful_sends,
-            "failed_sends": manager.metrics.failed_sends
-        },
-        "audio_buffers": audio_buffer_manager.get_stats(),
-        "redis": redis_listener.get_stats()
-    }
-
 # Combined startup event handler with improved error handling
 @app.on_event("startup")
 async def startup_event():
@@ -431,14 +401,6 @@ async def monitor_connection_health():
         if health.get("dead_connections_cleaned", 0) > 0:
             logger.warning(f"Cleaned up {health['dead_connections_cleaned']} dead connections")
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean shutdown of all services"""
-    try:
-        redis_listener.stop()
-        logger.info("✅ Services shut down cleanly")
-    except Exception as e:
-        logger.error(f"❌ Shutdown error: {e}")
 
 # Input validation helper
 def validate_websocket_message(data: dict) -> tuple[bool, str]:
@@ -785,41 +747,6 @@ async def handle_audio_stream_end(websocket: WebSocket, tenant_id: str, user_id:
                 "message": f"Error processing final audio chunk: {str(e)}"
             })
 
-@app.get("/health/websockets")
-async def websocket_health():
-    """WebSocket-specific health check"""
-    return await manager.health_check()
-
-@app.get("/health/detailed")
-async def detailed_health():
-    """Detailed system health report"""
-    from backend.monitoring import get_monitoring_report
-    return get_monitoring_report()
-
-@app.get("/health/status")
-async def health_status():
-    """Current system status"""
-    from backend.monitoring import get_health_status
-    return get_health_status()
-
-@app.post("/admin/cleanup")
-async def force_cleanup():
-    """Force cleanup of stale connections and buffers"""
-    # Clean up WebSocket connections
-    ws_health = await manager.cleanup_stale_connections()
-    
-    # Clean up audio buffers
-    buffer_cleanup = audio_buffer_manager.cleanup_stale_buffers()
-    
-    return {
-        "status": "cleanup_completed",
-        "websocket_cleanup": "completed",
-        "audio_buffers_cleaned": buffer_cleanup,
-        "timestamp": datetime.now().isoformat()
-    }
-
-@app.post("/admin/ping-connections")
-async def ping_all_connections():
     """Ping all active WebSocket connections"""
     results = await manager.ping_all_connections()
     return {

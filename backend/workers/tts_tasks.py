@@ -62,7 +62,36 @@ def generate_tts_with_groq(text: str, voice: str, output_path: str) -> tuple[boo
             groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
         
         print(f"🔄 [TTS] Attempting Groq generation...")
-        
+        if voice not in ["Aaliyah-PlayAI",
+            "Adelaide-PlayAI",
+            "Angelo-PlayAI",
+            "Arista-PlayAI",
+            "Atlas-PlayAI",
+            "Basil-PlayAI",
+            "Briggs-PlayAI",
+            "Calum-PlayAI",
+            "Celeste-PlayAI",
+            "Cheyenne-PlayAI",
+            "Chip-PlayAI",
+            "Cillian-PlayAI",
+            "Deedee-PlayAI",
+            "Eleanor-PlayAI",
+            "Fritz-PlayAI",
+            "Gail-PlayAI",
+            "Indigo-PlayAI",
+            "Jennifer-PlayAI",
+            "Judy-PlayAI",
+            "Mamaw-PlayAI",
+            "Mason-PlayAI",
+            "Mikail-PlayAI",
+            "Mitch-PlayAI",
+            "Nia-PlayAI",
+            "Quinn-PlayAI",
+            "Ruby-PlayAI",
+            "Thunder-PlayAI"
+        ]:
+            voice = "Fritz-PlayAI"  # Default voice if not recognized
+
         # Generate audio using Groq
         response = groq_client.audio.speech.create(
             model="playai-tts",

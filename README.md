@@ -2,6 +2,8 @@
 
 To run the app, use the following command:
 
+#### Server IP: `172.17.180.124`
+
 ```bash
 ./start.sh
 ```

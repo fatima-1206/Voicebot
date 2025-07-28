@@ -15,8 +15,9 @@ import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor
 import datetime
-
+import httpx
 class VoicebotSTTClient:
+    # replace localhost with 172.17.180.124 when running away from the server
     def __init__(self, host="localhost", port=8000, tenant_id="d7acb015-1ce6-451d-b253-d7455070b4b4", user_id="f00ce248-5a04-41f5-97ca-828d24ea265a"):
         self.host = host
         self.port = port
@@ -45,16 +46,7 @@ class VoicebotSTTClient:
         self.session_start_time = None
         
         # Thread pool for audio processing
-        self.executor = ThreadPoolExecutor(max_workers=2)
-        
-        # Create transcription log file like CLI
-        # with open("transcription.txt", "w", encoding="utf-8") as f:
-        #     f.write(f"=== Transcription Session Started at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
-        
-        # # Create chat log file like CLI
-        # with open("chat.txt", "w", encoding="utf-8") as f:
-        #     f.write(f"=== Chat Session Started at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
-        
+        self.executor = ThreadPoolExecutor(max_workers=2)        
         self.input_device = None  # Add this line
 
     def list_input_devices(self):
@@ -117,7 +109,32 @@ class VoicebotSTTClient:
                 self.audio_queue.put_nowait(audio_int16)
             except queue.Full:
                 print("⚠️ Audio queue full, dropping chunk")
-    
+
+    async def submit_text_query(self):
+        query = input("Enter your text query: ").strip()
+        self.api_url = f"http://{self.host}:{self.port}"
+        self.token = input("Enter your API token: ").strip()
+        if not query:
+            print("❌ Query cannot be empty")
+            return
+        url = f"{self.api_url}/query/submit"
+        payload = {
+            "tenant_id": self.tenant_id,
+            "user_id": self.user_id,
+            "query": query
+        }
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(url, json=payload, headers=headers)
+                print(f"✅ Sent text-to-text request: {response.status_code}")
+            except Exception as e:
+                print(f"❌ Error sending text-to-text request: {e}")
+                return
+
+
+
+
     async def start_cli_style_pipeline(self, duration=None):
         """Start CLI-style continuous streaming using correct backend message types"""
         if not self.websocket:
@@ -312,17 +329,27 @@ class VoicebotSTTClient:
     async def listen_for_responses(self):
         """Listen for responses from WebSocket - CLI-style output"""
         if not self.websocket:
+            print("❌ Not connected to WebSocket")
             return
         
         try:
             async for message in self.websocket:
                 try:
                     data = json.loads(message)
-                    message_type = data.get("type", "unknown")
-                    
+                    try:
+                        data = json.loads(message)
+                        if isinstance(data, dict):
+                            message_type = data.get("type", "unknown")
+                        else:
+                            print(f"❌ Received non-dict message: {data}")
+                            message_type = "unknown"
+                    except Exception as e:
+                        print(f"❌ Error decoding message: {e}")
+                        message_type = "unknown"
                     # Handle different message types with CLI-style formatting
                     if message_type == "transcription_result":
                         await self.handle_transcription_result(data)
+                    
                         
                     elif message_type == "speech_detected":
                         await self.handle_speech_detected(data)
@@ -340,7 +367,8 @@ class VoicebotSTTClient:
                         
                     elif message_type == "audio_stream":
                         await self.handle_audio_stream(data)
-                        
+                    elif message_type == "text_response":
+                        print(f"🤖 Response: {data}")
                     elif message_type == "transcription_submitted":
                         # Transcription was submitted for processing
                         transcription_id = data.get('transcription_id', 'N/A')
@@ -353,8 +381,12 @@ class VoicebotSTTClient:
                         print("🔄 [SESSION] Continuous conversation stopped")
                         
                     elif message_type == "error":
-                        error_msg = data.get('message', 'Unknown error')
-                        print(f"\n❌ [ERROR] {error_msg}")
+                        if data.type is str:
+                            print(f"❌ [ERROR] {data}")
+                        else:
+                            # Handle structured error messages
+                            error_msg = data.get('message', 'Unknown error')
+                            print(f"\n❌ [ERROR] {error_msg}")
                         
                     elif message_type == "ping":
                         # Respond to ping
@@ -389,20 +421,14 @@ class VoicebotSTTClient:
             timestamp = datetime.datetime.now().strftime('%H:%M:%S')
             chunk_num = chunk_id.split('_')[-1] if '_' in chunk_id else chunk_id
             
-            # Log to file like CLI
-            # with open("transcription.txt", "a", encoding="utf-8") as f:
-            #     f.write(f"\n[B{chunk_num[:3]}] {transcript}\n")
+          
             
             print(f"⏱ Transcription took {processing_time:.2f} seconds")
-            # with open("transcription.txt", "a", encoding="utf-8") as f:
-            #     f.write(f"Transcription took {processing_time:.2f} seconds\n")
-            
+           
             # If this triggers a query, show the generating message
             if len(transcript.split()) > 1:  # Only for meaningful transcripts
                 print(f"🧑 Generating response for: {transcript}")
-                # with open("chat.txt", "a", encoding="utf-8") as f:
-                #     f.write(f"\n[{timestamp}] 🧑: {transcript}\n")
-    
+               
     async def handle_speech_detected(self, data):
         """Handle speech detection"""
         transcript = data.get('transcript', 'N/A')
@@ -419,9 +445,7 @@ class VoicebotSTTClient:
         
         # Display like CLI
         print(f"🤖 Response: {response_text}")
-        # with open("chat.txt", "a", encoding="utf-8") as f:
-        #     f.write(f"[{timestamp}] 🤖: {response_text}\n")
-        
+       
         # Show TTS processing like CLI
         print(f"🗣 Speaking: {response_text[:50]}{'...' if len(response_text) > 50 else ''}")
     
@@ -504,9 +528,7 @@ class VoicebotSTTClient:
             # Show like CLI
             timestamp = datetime.datetime.now().strftime('%H:%M:%S')
             print(f"🧑 Generating response for: {query}")
-            # with open("chat.txt", "a", encoding="utf-8") as f:
-            #     f.write(f"\n[{timestamp}] 🧑: {query}\n")
-            
+        
             message = {
                 "type": "query_with_tts",
                 "message": query,
@@ -572,7 +594,8 @@ async def main():
         
         print("\n🎯Voicebot Client:")
         print("1. CLI-style Real-time Pipeline (unlimited)")
-        print("2. Exit")
+        print("2. Text Query")
+        print("3. Exit")
         
         while True:
             try:
@@ -581,6 +604,8 @@ async def main():
                 if choice == "1":
                     await client.start_cli_style_pipeline()
                 elif choice == "2":
+                    await client.submit_text_query()
+                elif choice == "3":
                     print("👋 Exiting...")
                     break
                 else:

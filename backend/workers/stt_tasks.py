@@ -54,6 +54,8 @@ def bytes_to_numpy_audio(audio_bytes: bytes) -> np.ndarray:
 
 
 def should_respond_to_transcript(transcript: str) -> bool:
+    return True # the rules at bottom aren't working well enough, so we just respond to everything for now
+    
     """Determine if the transcript warrants an immediate response"""
     if not transcript or len(transcript.strip()) < 3:
         return False
@@ -313,7 +315,7 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
                 tenant_id=tenant_id,
                 user_id=user_id,
                 language="en",
-                voice="en-US-JennyNeural",
+                voice="Fritz-PlayAI",  # Default voice
                 stream_audio=True
             )
         

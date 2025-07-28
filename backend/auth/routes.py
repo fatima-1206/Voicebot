@@ -73,7 +73,10 @@ def register_user(data: RegisterUserRequest, db: Session = Depends(get_db)):
         fname=data.fname,
         lname=data.lname,
         email=data.email,
-        password_hash=hash_password(data.password)
+        password_hash=hash_password(data.password),
+        dob=data.DoB,
+        gender=(data.gender if data.gender in ['F', 'M'] else '-'),
+        display_name=data.display_name
     )
     db.add(user)
     db.commit()
@@ -115,6 +118,9 @@ def register_solo_user(data: RegisterSoloUserRequest, db: Session = Depends(get_
         lname=data.lname,
         email=data.email,
         password_hash=hash_password(data.password),
+        dob=data.DoB,
+        gender=(data.gender if data.gender in ['F', 'M'] else '-'),
+        display_name=data.display_name,
         is_admin=True
     )
     db.add(user)

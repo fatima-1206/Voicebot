@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr
 from uuid import UUID
 from typing import Optional
+from datetime import date
 
 class RegisterOrgRequest(BaseModel):
     tenant_name: str
@@ -17,7 +18,9 @@ class RegisterUserRequest(BaseModel):
     lname: str
     email: EmailStr
     password: str
-
+    DoB: Optional[date] = None  # Optional field for date of birth
+    gender: Optional[str] = None  # Optional
+    display_name: Optional[str] = None  # Optional field for display name
 class RegisterSoloUserRequest(BaseModel):
     fname: str
     lname: str
@@ -25,7 +28,9 @@ class RegisterSoloUserRequest(BaseModel):
     password: str
     tenant_name: Optional[str] = None  # Add this field
     join_code: Optional[str] = None    # Add this field
-
+    DoB: Optional[date] = None  # Optional field for date of birth
+    gender: Optional[str] = None  # Optional
+    display_name: Optional[str] = None  # Optional field for display name
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str

@@ -121,7 +121,7 @@ class VoicebotSTTClient:
     async def submit_text_query(self):
         query = input("Enter your text query: ").strip()
         self.api_url = f"http://{self.host}:{self.port}"
-        self.token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiZjAwY2UyNDgtNWEwNC00MWY1LTk3Y2EtODI4ZDI0ZWEyNjVhIiwidGVuYW50X2lkIjoiZDdhY2IwMTUtMWNlNi00NTFkLWIyNTMtZDc0NTUwNzBiNGI0IiwiaXNfYWRtaW4iOnRydWUsImV4cCI6MTc1NDI4OTgyN30.TEmmPc0siGvuhwRqGRx4OIVZVfMj_h0L6-SyEn3g6zk"
+        self.token = input("Enter your API token: ").strip()
         if not query:
             print("❌ Query cannot be empty")
             return

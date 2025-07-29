@@ -525,7 +525,73 @@ class VoicebotSTTClient:
         # Display like CLI
         print(f"🤖 Response: {response_text}")
        
-      
+    async def record_till_keypress(self):
+        """Record audio until user presses Enter, then send the audio chunk."""
+        if not self.websocket:
+            print("❌ Not connected to WebSocket")
+            return
+
+        print("🎤 Recording... Press Enter to stop.")
+        self.recording = True
+        self.streaming = True
+        self.stop_event.clear()
+        self.audio_buffer = np.array([], dtype=np.int16)
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        # Start audio stream
+        try:
+            self.audio_stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                callback=self.audio_callback,
+                blocksize=self.chunk_size,
+                dtype='float32',
+                latency='low',
+                device=self.input_device
+            )
+            self.audio_stream.start()
+        except Exception as e:
+            print(f"❌ Failed to start recording: {e}")
+            self.recording = False
+            self.streaming = False
+            return
+
+        def wait_for_keypress():
+            input()  # Wait for Enter
+            self.stop_event.set()
+
+        keypress_thread = threading.Thread(target=wait_for_keypress)
+        keypress_thread.start()
+
+        buffer = []
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    audio_chunk = self.audio_queue.get(timeout=0.05)
+                    buffer.append(audio_chunk)
+                except queue.Empty:
+                    await asyncio.sleep(0.01)
+                    continue
+        finally:
+            self.audio_stream.stop()
+            self.audio_stream.close()
+            self.recording = False
+            self.streaming = False
+
+        if buffer:
+            final_audio = np.concatenate(buffer)
+            await self.send_audio_chunk(final_audio, is_final=True)
+            print("✅ Audio sent after keypress")
+        else:
+            print("⚠️ No audio recorded")  
+
+
+
+
     async def handle_audio_status(self, data):
         """Handle TTS audio status"""
         status = data.get('status', 'N/A')
@@ -658,9 +724,10 @@ async def cli_loop(client):
     print("\n🎯Voicebot Client:")
     print("1. Voicecall")
     print("2. Text Query")
-    print("3. Exit")
+    print("3. Record till keypress")
     print("4. turn rag off")       
     print("5. turn rag on") 
+    print("6. Exit")
     while True:
         try:
             choice = input("\nEnter your choice (1-4): ").strip()
@@ -669,14 +736,16 @@ async def cli_loop(client):
             elif choice == "2":
                 await client.submit_text_query()
             elif choice == "3":
-                print("👋 Exiting...")
-                break
+                await client.record_till_keypress()
             elif choice == "4":
                 client.rag = False
                 print("ℹ️ RAG processing disabled for voicecall")
             elif choice == "5":
                 client.rag = True
                 print("ℹ️ RAG processing enabled for voicecall")
+            elif choice == "6":
+                print("👋 Exiting...")
+                break
             else:
                 print("❌ Invalid choice, please try again")
         except KeyboardInterrupt:

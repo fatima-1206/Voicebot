@@ -147,7 +147,7 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
         if device == 'cpu':
             segments, info = model.transcribe(audio_data, beam_size=1, language=language, task="transcribe")
         else:
-            segments, info = model.transcribe(audio_data, beam_size=5, language=language, task="transcribe", vad_filter=True)
+            segments, info = model.transcribe(audio_data, beam_size=5, language=language, task="transcribe", vad_filter=False)
         
         transcription_duration = time.time() - start_time
         
@@ -236,7 +236,9 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
     """
     try:
         audio_data = bytes_to_numpy_audio(audio_bytes)
-        
+        # store the audio data in a temporary file if needed
+
+
         # Use Whisper with streaming mode
         segments, info = model.transcribe(
             audio_data,

@@ -19,6 +19,7 @@ import datetime
 import os
 from typing import Dict, Optional
 import httpx
+import uuid
 class VoicebotSTTClient:
     # replace localhost with 172.17.180.124 when running away from the server
     def __init__(self, host="localhost", port=8000, 
@@ -369,51 +370,74 @@ class VoicebotSTTClient:
         print(f"✅ Audio processing complete")
     
     async def send_audio_chunk(self, audio_data, is_final=False):
-        """Send audio chunk via WebSocket using correct message type"""
+        """Send audio chunk via WebSocket using correct message type and return chunk_id"""
         try:
             audio_b64 = base64.b64encode(audio_data.tobytes()).decode('utf-8')
-            
-            # Use the correct message type that backend expects
+            chunk_id = str(uuid.uuid4())
             message = {
                 "type": "continuous_audio_stream",
-                "rag": self.rag,  # Enable RAG processing
+                "rag": self.rag,
                 "audio": audio_b64,
                 "sample_rate": self.sample_rate,
                 "channels": self.channels,
-                "conversation_mode": True,  # Enable conversation mode for auto-response
-                "auto_respond": True,       # Enable automatic responses
+                "conversation_mode": True,
+                "auto_respond": True,
                 "tts_language": "en",
                 "voice": "Fritz-PlayAI",
-                "timestamp": int(time.time() * 1000)
+                "timestamp": int(time.time() * 1000),
+                "chunk_id": chunk_id,
+                "final": is_final
             }
-            
             await self.websocket.send(json.dumps(message))
-            
+
+            # In send_audio_chunk, create a dict for each chunk_id:
+            loop = asyncio.get_event_loop()
+            future = loop.create_future()
+            self.pending_queries[chunk_id] = {
+                "transcription_result": None,
+                "text_response": None,
+                "tts": None,
+                "future": future
+            }
+
+            return chunk_id
         except Exception as e:
             print(f"❌ Error sending audio chunk: {e}")
+            return None
     
     async def listen_for_responses(self):
         """Listen for responses from WebSocket - CLI-style output"""
         if not self.websocket:
             print("❌ Not connected to WebSocket")
             return
-        
+
         try:
             async for message in self.websocket:
                 try:
                     data = json.loads(message)
-                    try:
-                        data = json.loads(message)
-                        if isinstance(data, dict) and "type" in data:
-                            message_type = data.get("type", "unknown")
-                        else:
-                            print(f"❌ Received non-dict message: {data}")
-                            message_type = "unknown"
-                    except Exception as e:
-                        print(f"❌ Error decoding message: {e}")
-                        message_type = "unknown"
-                    # Handle different message types with CLI-style formatting
+                    message_type = data.get("type", "unknown") if isinstance(data, dict) else "unknown"
 
+                    # --- NEW: Resolve futures for any message with chunk_id ---
+                    chunk_id = data.get("chunk_id")
+                    if chunk_id and chunk_id in self.pending_queries:
+                        entry = self.pending_queries[chunk_id]
+                        message_type = data.get("type", "unknown")
+                        if message_type == "transcription_result":
+                            entry["transcription_result"] = data
+                            await self.handle_transcription_result(data)
+                        elif message_type in ("query_result", "text_response"):
+                            entry["text_response"] = data
+                            await self.handle_query_response(data)
+                        elif message_type == "audio_status":
+                            entry["tts"] = data
+                            await self.handle_audio_status(data)
+                        # Check if all responses are present
+                        if all([entry["transcription_result"], entry["text_response"], entry["tts"]]):
+                            if not entry["future"].done():
+                                entry["future"].set_result(entry)
+                            self.pending_queries.pop(chunk_id)
+
+                    # --- Existing message type handling ---
                     if message_type == "transcription_result":
                         await self.handle_transcription_result(data)
                     elif message_type in ("query_result", "query_with_tts_result", "text_response"):
@@ -472,7 +496,7 @@ class VoicebotSTTClient:
                         print("🏓 Pong received")
                         
                     else:
-                        print(f"❓ Unknown message type: {message_type}")
+                        # print(f"❓ Unknown message type: {message_type}")
                         # Don't show unknown messages as errors, backend may send other types
                         pass
                         
@@ -584,8 +608,24 @@ class VoicebotSTTClient:
 
         if buffer:
             final_audio = np.concatenate(buffer)
-            await self.send_audio_chunk(final_audio, is_final=True)
+            chunk_id = await self.send_audio_chunk(final_audio, is_final=True)
             print("✅ Audio sent after keypress")
+            if chunk_id:
+                loop = asyncio.get_event_loop()
+                future = loop.create_future()
+                self.pending_queries[chunk_id] = {
+                    "transcription_result": None,
+                    "text_response": None,
+                    "tts": None,
+                    "future": future
+                }
+                print(f"⏳ Waiting for backend response for chunk_id={chunk_id}...")
+                try:
+                    response_data = await asyncio.wait_for(future, timeout=30.0)
+                    print(f"✅ Got response: {response_data}")
+                except asyncio.TimeoutError:
+                    print("❌ Timed out waiting for response.")
+                    self.pending_queries.pop(chunk_id, None)
         else:
             print("⚠️ No audio recorded")  
 

@@ -311,6 +311,7 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
                 tts_language=data.get("tts_language", "en"),
                 voice=data.get("voice", "Fritz-PlayAI"),
                 auto_respond=data.get("auto_respond", True),
+                chunk_id= data.get("chunk_id", str(uuid4())),
                 use_rag=data.get("rag", True) # Enable RAG processing if not specified
             )
     

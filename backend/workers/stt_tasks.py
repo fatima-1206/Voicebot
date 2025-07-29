@@ -304,7 +304,7 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
 @celery_app.task(name='process_continuous_audio', bind=True)
 def process_continuous_audio_task(self,speech_bytes, speech_timestamps, user_id: str, tenant_id: str, 
                                  buffer_key: str, tts_language: str = "en", 
-                                 voice: str = "en-US-JennyNeural", auto_respond: bool = True, use_rag: bool = True):
+                                 voice: str = "Fritz-PlayAI",chunk_id=None, auto_respond: bool = True, use_rag: bool = True):
     """
     Process continuous audio stream with server-side VAD
     Detects speech segments and triggers STT+RAG+TTS pipeline
@@ -317,9 +317,10 @@ def process_continuous_audio_task(self,speech_bytes, speech_timestamps, user_id:
             return { "type": "status",
                 "status": "no_speech"}
         
-        
-        # Create unique chunk ID for this segment
-        chunk_id = f"{user_id}_{int(time.time() * 1000)}"
+
+        if not chunk_id:   
+            # Create unique chunk ID for this segment
+            chunk_id = f"{user_id}_{int(time.time() * 1000)}"
             
         segment_result = process_speech_segment(
             speech_bytes, user_id, chunk_id, tenant_id,
@@ -330,6 +331,7 @@ def process_continuous_audio_task(self,speech_bytes, speech_timestamps, user_id:
         return {
             "status": "success",
             "segments_processed": len(segment_result),
+            "chunk_id": chunk_id,
             "results": segment_result
         }
         
@@ -398,6 +400,7 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
             # Trigger RAG + TTS response
             from backend.workers.query_tasks import process_query_with_tts_task
             process_query_with_tts_task.delay(
+                chunk_id=chunk_id,
                 query_id=response_id,
                 tts_task_id=tts_task_id,
                 query=transcript,

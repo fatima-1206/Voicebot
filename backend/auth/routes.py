@@ -185,4 +185,22 @@ def get_join_code(
 
 
 
-
+@router.get("/user", response_model=UserResponse)
+def get_user_info(
+    user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    db_user = db.query(models.User).filter_by(id=user.user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return UserResponse(
+        id=db_user.id,
+        tenant_id=db_user.tenant_id,
+        fname=db_user.fname,
+        lname=db_user.lname,
+        email=db_user.email,
+        is_admin=db_user.is_admin,
+        display_name=db_user.display_name,
+        DoB=db_user.dob,
+        gender=db_user.gender)

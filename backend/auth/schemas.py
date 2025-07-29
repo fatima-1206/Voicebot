@@ -38,3 +38,14 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+class UserResponse(BaseModel):
+    id: UUID
+    tenant_id: UUID
+    fname: str
+    lname: str
+    email: EmailStr
+    is_admin: bool
+    display_name: Optional[str] = None  # Optional field for display name
+    DoB: Optional[date] = None  # Optional field for date of birth
+    gender: Optional[str] = None  # Optional

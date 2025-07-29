@@ -331,7 +331,7 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
 
 
 @celery_app.task(name='process_continuous_audio', bind=True)
-def process_continuous_audio_task(self, audio_bytes: bytes, user_id: str, tenant_id: str, 
+def process_continuous_audio_task(self,audio_tensor, speech_timestamps, user_id: str, tenant_id: str, 
                                  buffer_key: str, tts_language: str = "en", 
                                  voice: str = "en-US-JennyNeural", auto_respond: bool = True, use_rag: bool = True):
     """
@@ -340,66 +340,26 @@ def process_continuous_audio_task(self, audio_bytes: bytes, user_id: str, tenant
     """
     print(f"🔄 [CONTINUOUS] Processing audio buffer for user {user_id}")
     
-    try:
-        # Convert bytes to numpy array
-        audio_data = bytes_to_numpy_audio(audio_bytes)
-        if audio_data is None or len(audio_data) == 0:
-            return {"status": "no_audio"}
-        
-        # Convert to tensor for VAD
-        audio_tensor = torch.from_numpy(audio_data).float()
-        audio_tensor = torch.clamp(audio_tensor, -1.0, 1.0)
-        
-        # Apply VAD to detect speech segments
-        speech_timestamps = get_speech_timestamps(
-            audio_tensor, 
-            vad_model, 
-            sampling_rate=sample_rate,
-            threshold=0.2,
-            min_speech_duration_ms=200,  # Minimum 0.5s speech
-            min_silence_duration_ms=100,  # 0.3s silence to separate utterances
-            speech_pad_ms=50  # Add padding around speech
+    try: 
+        print(f"   🔍 Found {len(speech_timestamps)} speech segments")
+        if not speech_timestamps:
+            return { "type": "status",
+                "status": "no_speech"}
+        speech_bytes = audio_tensor.numpy().astype(np.float32).tobytes()
+            
+        # Create unique chunk ID for this segment
+        chunk_id = f"{user_id}_{int(time.time() * 1000)}"
+            
+        segment_result = process_speech_segment(
+            speech_bytes, user_id, chunk_id, tenant_id,
+            tts_language, voice, auto_respond, use_rag=use_rag
         )
         
-        print(f"   🔍 Found {len(speech_timestamps)} speech segments")
-        
-        if not speech_timestamps:
-            return {"status": "no_speech"}
-        
-        # Process each speech segment
-        processed_segments = []
-        for i, speech_segment in enumerate(speech_timestamps):
-            start_sample = speech_segment['start']
-            end_sample = speech_segment['end']
-            
-            # Extract speech segment
-            speech_audio = audio_tensor[start_sample:end_sample]
-            
-            # Skip very short segments
-            duration = len(speech_audio) / sample_rate
-            if duration < 0.5:
-                continue
-            
-            print(f"   🗣️ Processing speech segment {i+1}: {duration:.1f}s")
-            
-            # Convert back to bytes for STT
-            speech_bytes = (speech_audio.numpy() * 32767).astype(np.int16).tobytes()
-            
-            # Create unique chunk ID for this segment
-            chunk_id = f"{user_id}_{int(time.time() * 1000)}_{i}"
-            
-            # Process this speech segment immediately
-            segment_result = process_speech_segment(
-                speech_bytes, user_id, chunk_id, tenant_id,
-                tts_language, voice, auto_respond, use_rag=use_rag
-            )
-            
-            processed_segments.append(segment_result)
         
         return {
             "status": "success",
-            "segments_processed": len(processed_segments),
-            "results": processed_segments
+            "segments_processed": len(segment_result),
+            "results": segment_result
         }
         
     except Exception as e:
@@ -422,14 +382,15 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
             beam_size=1,
             language="en",
             condition_on_previous_text=False,
-            vad_filter=False,  # We already did VAD
+            vad_filter=True,  # We already did VAD
             initial_prompt=None
         )
         
         # Extract transcript
         transcript_parts = []
         for segment in segments:
-            transcript_parts.append(segment.text.strip())
+            segment = profanity.censor(segment.text.strip())
+            transcript_parts.append(segment.strip())
         
         transcript = " ".join(transcript_parts).strip()
         

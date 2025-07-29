@@ -15,19 +15,25 @@ import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor
 import datetime
+# import Dict
+import os
+from typing import Dict, Optional
 import httpx
 class VoicebotSTTClient:
     # replace localhost with 172.17.180.124 when running away from the server
     def __init__(self, host="localhost", port=8000, 
-                 tenant_id="cf670545-292c-49cc-af6c-798e7c786070",user_id="f19c393f-a23b-4337-88fa-71ca01733d62"):
+                 tenant_id="d7acb015-1ce6-451d-b253-d7455070b4b4",user_id="f00ce248-5a04-41f5-97ca-828d24ea265a"):
         self.host = host
         self.port = port
-        self.token=None
+        self.pending_queries: Dict[str, asyncio.Future] = {}
+
+        self.token="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiZjAwY2UyNDgtNWEwNC00MWY1LTk3Y2EtODI4ZDI0ZWEyNjVhIiwidGVuYW50X2lkIjoiZDdhY2IwMTUtMWNlNi00NTFkLWIyNTMtZDc0NTUwNzBiNGI0IiwiaXNfYWRtaW4iOnRydWUsImV4cCI6MTc1NDM3ODEzMH0.ge9ozk7RsT3xr60NvYSrmI_-LSKGIkwgg6tnfYrjBTQ"
         self.tenant_id = tenant_id
         self.user_id = user_id
         self.websocket_url = f"ws://{host}:{port}/ws/{tenant_id}/{user_id}"
         self.websocket = None
         self.recording = False
+        self.response_event = asyncio.Event()
         self.streaming = False
         self.audio_queue = queue.Queue(maxsize=100)
         self.stop_event = threading.Event()
@@ -117,27 +123,49 @@ class VoicebotSTTClient:
     async def submit_text_query(self):
         query = input("Enter your text query: ").strip()
         self.api_url = f"http://{self.host}:{self.port}"
+
         if not self.token:
-            self.token = input("Enter your API token: ").strip()
+            self.token = input("Enter your JWT access token: ").strip()
         if not query:
             print("❌ Query cannot be empty")
             return
+
         url = f"{self.api_url}/query/submit"
         payload = {
             "tenant_id": self.tenant_id,
             "user_id": self.user_id,
             "query": query,
-            "use_rag":self.rag
+            "use_rag": self.rag
         }
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(url, json=payload, headers=headers)
-                print(f"✅ Sent text-to-text request: {response.status_code}")
-            except Exception as e:
-                print(f"❌ Error sending text-to-text request: {e}")
-                return
+                if response.status_code != 200:
+                    print(f"❌ Server error: {response.status_code}")
+                    return
 
+                result = response.json()
+                query_id = result.get("query_id")
+                if not query_id:
+                    print("❌ No query_id returned from server.")
+                    return
+
+                # Create a future and wait for response
+                loop = asyncio.get_event_loop()
+                future = loop.create_future()
+                self.pending_queries[query_id] = future
+
+                print(f"📨 Query submitted. Waiting for response for query_id={query_id}...")
+                response_data = await asyncio.wait_for(future, timeout=30.0)
+                print(f"✅ Got response: {response_data}")
+
+            except asyncio.TimeoutError:
+                print("❌ Timed out waiting for response.")
+                self.pending_queries.pop(query_id, None)
+            except Exception as e:
+                print(f"❌ Error sending or receiving query: {e}")
 
 
 
@@ -195,6 +223,9 @@ class VoicebotSTTClient:
     
     async def stop_continuous_conversation(self):
         """Stop continuous conversation mode"""
+        # clear the buffer
+        self.audio_buffer = np.array([], dtype=np.int16)
+        self.chunk_counter = 0
         if not self.websocket:
             return
         
@@ -351,11 +382,23 @@ class VoicebotSTTClient:
                         print(f"❌ Error decoding message: {e}")
                         message_type = "unknown"
                     # Handle different message types with CLI-style formatting
+
                     if message_type == "transcription_result":
                         await self.handle_transcription_result(data)
+                    elif message_type in ("query_result", "query_with_tts_result", "text_response"):
+                        query_id = data.get("query_id")
+                        if query_id and query_id in self.pending_queries:
+                            future = self.pending_queries.pop(query_id)
+                            if not future.done():
+                                future.set_result(data)
+                                print(f"✅ [QUERY] Got response for {query_id[:8]}")
+                        else:
+                            print(f"🤖 [QUERY] {message_type}: {data}")
+
                     elif message_type == "speech_detected":
                         await self.handle_speech_detected(data)
-                        
+                    elif message_type == "query_result":
+                        await self.handle_query_response(data)
                     elif message_type == "query_with_tts_result":
                         await self.handle_query_response(data)
                         
@@ -398,6 +441,7 @@ class VoicebotSTTClient:
                         print("🏓 Pong received")
                         
                     else:
+                        print(f"❓ Unknown message type: {message_type}")
                         # Don't show unknown messages as errors, backend may send other types
                         pass
                         
@@ -441,6 +485,7 @@ class VoicebotSTTClient:
     
     async def handle_query_response(self, data):
         """Handle query response - CLI format"""
+        
         response_text = data.get('response', 'N/A')
         query = data.get('query', 'N/A')
         timestamp = datetime.datetime.now().strftime('%H:%M:%S')
@@ -448,8 +493,7 @@ class VoicebotSTTClient:
         # Display like CLI
         print(f"🤖 Response: {response_text}")
        
-        # Show TTS processing like CLI
-        print(f"🗣 Speaking: {response_text[:50]}{'...' if len(response_text) > 50 else ''}")
+      
     async def handle_audio_status(self, data):
         """Handle TTS audio status"""
         status = data.get('status', 'N/A')
@@ -578,56 +622,50 @@ def signal_handler(signum, frame):
     print("\n🛑 Received interrupt signal, shutting down...")
     sys.exit(0)
 
+async def cli_loop(client):
+    print("\n🎯Voicebot Client:")
+    print("1. Voicecall")
+    print("2. Text Query")
+    print("3. Exit")
+    print("4. turn rag off")       
+    print("5. turn rag on") 
+    while True:
+        try:
+            choice = input("\nEnter your choice (1-4): ").strip()
+            if choice == "1":
+                await client.start_cli_style_pipeline()
+            elif choice == "2":
+                await client.submit_text_query()
+            elif choice == "3":
+                print("👋 Exiting...")
+                break
+            elif choice == "4":
+                client.rag = False
+                print("ℹ️ RAG processing disabled for voicecall")
+            elif choice == "5":
+                client.rag = True
+                print("ℹ️ RAG processing enabled for voicecall")
+            else:
+                print("❌ Invalid choice, please try again")
+        except KeyboardInterrupt:
+            print("\n🛑 Interrupted by user")
+            break
+        except EOFError:
+            print("\n🛑 Input stream ended")
+            break
+
 async def main():
     signal.signal(signal.SIGINT, signal_handler)
-    
     client = VoicebotSTTClient()
-    
     try:
         if not await client.connect():
             return
-        
-        # Select input device
         client.select_input_device()
-        
-        # Start listening for responses in background
-        listen_task = asyncio.create_task(client.listen_for_responses())
-        
-        print("\n🎯Voicebot Client:")
-        print("1. Voicecall")
-        print("2. Text Query")
-        print("3. Exit")
-        print("4. turn rag off")       
-        print("5. turn rag on") 
-        while True:
-            try:
-                choice = input("\nEnter your choice (1-4): ").strip()
-                
-                if choice == "1":
-                    await client.start_cli_style_pipeline()
-                elif choice == "2":
-                    await client.submit_text_query()
-                elif choice == "3":
-                    print("👋 Exiting...")
-                    break
-                elif choice == "4":
-                    client.rag = False
-                    print("ℹ️ RAG processing disabled for voicecall")
-                elif choice == "5":
-                    client.rag = True
-                    print("ℹ️ RAG processing enabled for voicecall")
-                else:
-                    print("❌ Invalid choice, please try again")
-                    
-            except KeyboardInterrupt:
-                print("\n🛑 Interrupted by user")
-                break
-            except EOFError:
-                print("\n🛑 Input stream ended")
-                break
-        
-        listen_task.cancel()
-        
+        # Run both CLI and listener concurrently
+        await asyncio.gather(
+            client.listen_for_responses(),
+            cli_loop(client)
+        )
     except KeyboardInterrupt:
         print("\n🛑 Interrupted by user")
     except Exception as e:

@@ -11,6 +11,9 @@ from backend.tts.routes import router as tts_router
 from backend.ws_manager import manager, connection_monitor, health_monitor
 from fastapi import WebSocket, WebSocketDisconnect
 import json
+import torch
+from backend.workers.stt_tasks import bytes_to_numpy_audio
+from backend.workers.stt_tasks import vad_model, sample_rate
 import base64
 import tempfile
 from backend.workers.tasks import transcribe_chunk
@@ -195,8 +198,11 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
 
 async def process_websocket_message(websocket: WebSocket, tenant_id: str, user_id: str, data: dict):
     """Process individual WebSocket messages with improved error handling"""
-    
-    message_type = data.get("type")
+    if "type" in data:
+        message_type = data.get("type")
+    else:
+        message_type = "unknown"
+        print(f"❓ Unknown message type received: {data}")
     key = f"{tenant_id}_{user_id}"
     
     if message_type == "ping":
@@ -247,10 +253,33 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
             # Get buffer contents and clear it
             buffer_data = audio_buffer_manager.get_and_clear_buffer(key)
             
-            # Submit to Celery for processing
+
+            
+            # Submit to Celery for processing only if there is speech detected
+            # Apply VAD to detect speech segments
+            from backend.workers.stt_tasks import get_speech_timestamps
+            audio_data = bytes_to_numpy_audio(audio_bytes)
+            if audio_data is None or len(audio_data) == 0:
+                return {"status": "no_audio"}
+            
+            # Convert to tensor for VAD
+            audio_tensor = torch.from_numpy(audio_data).float()
+            audio_tensor = torch.clamp(audio_tensor, -1.0, 1.0)
+            
+            speech_timestamps = get_speech_timestamps(
+                audio_tensor, 
+                vad_model, 
+                sampling_rate=sample_rate,
+                threshold=0.2,
+                min_speech_duration_ms=200,  # Minimum 0.5s speech
+                min_silence_duration_ms=100,  # 0.3s silence to separate utterances
+                speech_pad_ms=50  # Add padding around speech
+            )
+            
             from backend.workers.stt_tasks import process_continuous_audio_task
             process_continuous_audio_task.delay(
-                audio_bytes=buffer_data,
+                audio_tensor=audio_tensor,
+                speech_timestamps=speech_timestamps,
                 user_id=user_id,
                 tenant_id=tenant_id,
                 buffer_key=key,

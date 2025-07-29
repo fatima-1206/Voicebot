@@ -2,7 +2,7 @@
 Conversation and pipeline-related Celery tasks
 """
 from backend.workers.celery_worker import celery_app
-from backend.workers.stt_tasks import transcribe_chunk, should_respond_to_transcript
+from backend.workers.stt_tasks import transcribe_chunk
 from backend.workers.query_tasks import process_query_with_tts_task
 from uuid import uuid4
 
@@ -29,7 +29,7 @@ def transcribe_and_respond_task(self, audio_bytes: bytes, user_id: str, chunk_id
         transcript = stt_result['transcript']
         
         # Step 2: Check if we should auto-respond
-        if auto_respond and conversation_mode and should_respond_to_transcript(transcript):
+        if auto_respond and conversation_mode:
             print(f"🤖 [CONVERSATION] Auto-responding to: '{transcript}' (RAG: {use_rag})")
             
             # Immediately trigger RAG + TTS response in background

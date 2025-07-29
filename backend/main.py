@@ -23,6 +23,7 @@ import time
 import redis
 import asyncio
 import threading
+import numpy as np
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
@@ -180,7 +181,7 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
             try:
                 await process_websocket_message(websocket, tenant_id, user_id, data)
             except Exception as e:
-                logger.error(f"❌ Error processing WebSocket message: {e}")
+                logger.error(f"❌ Error processing WebSocket message: {e}\b{data}")
                 await websocket.send_json({
                     "type": "error",
                     "message": f"Error processing message: {str(e)}"
@@ -275,10 +276,11 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
                 min_silence_duration_ms=100,  # 0.3s silence to separate utterances
                 speech_pad_ms=50  # Add padding around speech
             )
-            
+        #    convert tensor back to bytes
+            audio_bytes = audio_tensor.numpy().astype(np.float32).tobytes()
             from backend.workers.stt_tasks import process_continuous_audio_task
             process_continuous_audio_task.delay(
-                audio_tensor=audio_tensor,
+                speech_bytes=audio_bytes,
                 speech_timestamps=speech_timestamps,
                 user_id=user_id,
                 tenant_id=tenant_id,

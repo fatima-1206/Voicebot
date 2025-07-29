@@ -53,37 +53,6 @@ def bytes_to_numpy_audio(audio_bytes: bytes) -> np.ndarray:
         return None
 
 
-def should_respond_to_transcript(transcript: str) -> bool:
-    return True # the rules at bottom aren't working well enough, so we just respond to everything for now
-    
-    """Determine if the transcript warrants an immediate response"""
-    if not transcript or len(transcript.strip()) < 3:
-        return False
-        
-    transcript = transcript.strip().lower()
-    
-    # Respond to questions
-    if transcript.endswith('?'):
-        return True
-        
-    # Respond to common conversation starters/phrases
-    conversation_triggers = [
-        'hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening',
-        'what is', 'tell me', 'how do', 'can you', 'please', 'help me',
-        'i need', 'i want', 'explain', 'show me', 'where is', 'when is',
-        'who is', 'why', 'how much', 'how many', 'thank you', 'thanks'
-    ]
-    
-    for trigger in conversation_triggers:
-        if trigger in transcript:
-            return True
-    
-    # Respond to complete sentences (basic check)
-    if len(transcript.split()) >= 4 and (transcript.endswith('.') or transcript.endswith('!')):
-        return True
-        
-    return False
-
 
 def send_transcription_result_via_websocket(tenant_id: str, user_id: str, chunk_id: str, 
                                           transcript: str, confidence: float, detected_language: str,
@@ -306,7 +275,7 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
             redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(result))
         
         # If final and should respond, trigger response generation
-        if is_final and should_respond_to_transcript(transcript):
+        if is_final:
             from backend.workers.query_tasks import process_query_with_tts_task
             process_query_with_tts_task.delay(
                 query_id=str(uuid4()),
@@ -331,7 +300,7 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
 
 
 @celery_app.task(name='process_continuous_audio', bind=True)
-def process_continuous_audio_task(self,audio_tensor, speech_timestamps, user_id: str, tenant_id: str, 
+def process_continuous_audio_task(self,speech_bytes, speech_timestamps, user_id: str, tenant_id: str, 
                                  buffer_key: str, tts_language: str = "en", 
                                  voice: str = "en-US-JennyNeural", auto_respond: bool = True, use_rag: bool = True):
     """
@@ -345,8 +314,8 @@ def process_continuous_audio_task(self,audio_tensor, speech_timestamps, user_id:
         if not speech_timestamps:
             return { "type": "status",
                 "status": "no_speech"}
-        speech_bytes = audio_tensor.numpy().astype(np.float32).tobytes()
-            
+        
+        
         # Create unique chunk ID for this segment
         chunk_id = f"{user_id}_{int(time.time() * 1000)}"
             
@@ -417,7 +386,7 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
             redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(stt_result))
         
         # Step 2: Check if we should respond
-        if auto_respond and should_respond_to_transcript(transcript):
+        if auto_respond:
             print(f"   🤖 Triggering response for: '{transcript}'")
             
             # Generate response immediately (don't delay this)

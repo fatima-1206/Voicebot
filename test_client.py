@@ -448,6 +448,7 @@ class VoicebotSTTClient:
                 except json.JSONDecodeError:
                     print(f"❌ Invalid JSON received: {message}")
                 except Exception as e:
+                    print(data)
                     print(f"❌ Error processing message: {e}")
                     
         except websockets.exceptions.ConnectionClosed:

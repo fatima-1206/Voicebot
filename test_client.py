@@ -536,7 +536,7 @@ class VoicebotSTTClient:
                 "max_tokens": 500,
                 "temperature": 0.7,
                 "language": "en",
-                "voice": "en-US-JennyNeural",
+                "voice": "Fritz-PlayAI",
                 "stream_audio": True
             }
             

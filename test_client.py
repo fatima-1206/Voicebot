@@ -27,7 +27,7 @@ class VoicebotSTTClient:
         self.port = port
         self.pending_queries: Dict[str, asyncio.Future] = {}
 
-        self.token="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiZjAwY2UyNDgtNWEwNC00MWY1LTk3Y2EtODI4ZDI0ZWEyNjVhIiwidGVuYW50X2lkIjoiZDdhY2IwMTUtMWNlNi00NTFkLWIyNTMtZDc0NTUwNzBiNGI0IiwiaXNfYWRtaW4iOnRydWUsImV4cCI6MTc1NDM3ODEzMH0.ge9ozk7RsT3xr60NvYSrmI_-LSKGIkwgg6tnfYrjBTQ"
+        self.token=None
         self.tenant_id = tenant_id
         self.user_id = user_id
         self.websocket_url = f"ws://{host}:{port}/ws/{tenant_id}/{user_id}"
@@ -299,35 +299,66 @@ class VoicebotSTTClient:
         print("✅ Audio capture stopped")
     
     async def process_audio_chunks_continuously(self, duration=None):
-        """Process audio chunks continuously"""
+        """Process audio chunks continuously with improved buffer management"""
         start_time = time.time()
         last_send_time = start_time
-        
+
+        # Silence detection parameters
+        silence_threshold_db = -35  # dBFS, make configurable
+        max_silence_duration = 1.0  # seconds, make configurable
+        min_chunk_duration = 1.0    # seconds
+        max_chunk_duration = 3.0    # seconds
+
+        silence_threshold_lin = 10 ** (silence_threshold_db / 20)
+        silence_duration = 0.0
+        frames_collected = 0
+        buffer = []
+        sample_rate = self.sample_rate
+
+        def rms(audio):
+            """RMS stands for "Root Mean Square." In audio processing, it measures the average power (loudness) of an audio signal. It is calculated by squaring each sample, taking the mean of those squares, and then taking the square root. RMS is commonly used to detect silence or measure volume."""
+            audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
+            mean_square = np.mean(np.square(audio)) if len(audio) > 0 else 0.0
+            return np.sqrt(max(mean_square, 0.0))
+
         print("📡 Starting continuous audio processing...")
-        
+
         while self.streaming and not self.stop_event.is_set():
             current_time = time.time()
-            
-            # Check duration limit
             if duration and (current_time - start_time) >= duration:
                 print(f"\n⏰ Duration limit reached ({duration}s)")
                 break
-            
+
             try:
                 audio_chunk = self.audio_queue.get(timeout=0.05)
-                self.audio_buffer = np.concatenate([self.audio_buffer, audio_chunk])
-                
-                # Send when we have enough audio
-                should_send = len(self.audio_buffer) >= self.max_buffer_size
-                
-                if should_send:
-                    await self.send_audio_chunk(self.audio_buffer)
-                    
-                    # Clear buffer completely for next chunk
-                    self.audio_buffer = np.array([], dtype=np.int16)
+                mono_audio = audio_chunk.flatten()
+                buffer.append(mono_audio)
+                frames_collected += len(mono_audio)
+
+                block_rms = rms(mono_audio)
+                if block_rms < silence_threshold_lin:
+                    silence_duration += self.chunk_duration_ms / 1000.0
+                else:
+                    silence_duration = 0.0
+
+                chunk_ready = (
+                    frames_collected >=
+                    self.min_buffer_size and
+                    (silence_duration >= max_silence_duration or frames_collected >= self.max_buffer_size)
+                )
+
+                if chunk_ready:
+                    # Concatenate and send the buffered audio
+                    final_audio = np.concatenate(buffer)
+                    await self.send_audio_chunk(final_audio)
+
+                    # Reset for next chunk
+                    buffer = []
+                    frames_collected = 0
+                    silence_duration = 0.0
                     last_send_time = current_time
                     self.chunk_counter += 1
-            
+
             except queue.Empty:
                 await asyncio.sleep(0.01)
                 continue

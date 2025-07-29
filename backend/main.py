@@ -282,20 +282,25 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
 
             # Save audio_bytes to a temporary WAV file for debugging or further processing
 
-            wav_filename = os.path.join("/home/genesys/voicebot/Voicebot_fastapi/backend/temp/", f"{key}_{int(time.time())}.wav")
-            try:
-                with wave.open(wav_filename, "wb") as wf:
-                    int16_audio = np.clip(audio_tensor.numpy(), -1.0, 1.0)
-                    int16_audio = (int16_audio * 32767).astype(np.int16)
-                    audio_bytes = int16_audio.tobytes()
+            # wav_filename = os.path.join("/home/genesys/voicebot/Voicebot_fastapi/backend/temp/", f"{key}_{int(time.time())}.wav")
+            # try:
+            #     with wave.open(wav_filename, "wb") as wf:
+            #         int16_audio = np.clip(audio_tensor.numpy(), -1.0, 1.0)
+            #         int16_audio = (int16_audio * 32767).astype(np.int16)
+            #         audio_bytes = int16_audio.tobytes()
 
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)  # int16 = 2 bytes
-                    wf.setframerate(sample_rate)
-                    wf.writeframes(audio_bytes)
-                logger.info(f"Saved audio chunk to {wav_filename}")
-            except Exception as e:
-                logger.error(f"Failed to save WAV file: {e}")
+            #         wf.setnchannels(1)
+            #         wf.setsampwidth(2)  # int16 = 2 bytes
+            #         wf.setframerate(sample_rate)
+            #         wf.writeframes(audio_bytes)
+            #     logger.info(f"Saved audio chunk to {wav_filename}")
+
+            # except Exception as e:
+            #     logger.error(f"Failed to save WAV file: {e}")
+            
+            int16_audio = np.clip(audio_tensor.numpy(), -1.0, 1.0)
+            int16_audio = (int16_audio * 32767).astype(np.int16)
+            audio_bytes = int16_audio.tobytes()
             from backend.workers.stt_tasks import process_continuous_audio_task
             process_continuous_audio_task.delay(
                 speech_bytes=audio_bytes,

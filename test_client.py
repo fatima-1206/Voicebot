@@ -318,7 +318,7 @@ class VoicebotSTTClient:
                 self.audio_buffer = np.concatenate([self.audio_buffer, audio_chunk])
                 
                 # Send when we have enough audio
-                should_send = len(self.audio_buffer) >= self.chunk_size
+                should_send = len(self.audio_buffer) >= self.max_buffer_size
                 
                 if should_send:
                     await self.send_audio_chunk(self.audio_buffer)

@@ -171,7 +171,7 @@ def generate_tts_with_fallback(text: str, language: str, voice: str, output_path
     }
 
 
-def generate_tts_file(text: str, tts_task_id: str, language: str, voice: str, chunk_id: str=None) -> dict:
+def generate_tts_file(text: str, tts_task_id: str, language: str, voice: str, chunk_id: str=None, tenant_id =None, user_id=None) -> dict:
     """Generate TTS file using Groq with gTTS fallback without streaming"""
     
     try:

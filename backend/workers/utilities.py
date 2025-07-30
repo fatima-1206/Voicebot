@@ -224,7 +224,7 @@ def notify_audio_status(tenant_id: str, user_id: str, task_id: str, status: str,
         logger.error(f"❌ Failed to notify audio status: {e}")
         return False
 
-def notify_text_response_ready(tenant_id: str, user_id: str, query_id: str, query: str, response: str) -> bool:
+def notify_text_response_ready(tenant_id: str, user_id: str, query_id: str, query: str, response: str, use_rag: bool = True) -> bool:
     """Notify that text response is ready with improved error handling"""
     try:
         message = {
@@ -232,6 +232,7 @@ def notify_text_response_ready(tenant_id: str, user_id: str, query_id: str, quer
             "query_id": query_id,
             "query": query,
             "response": response,
+            "use_rag": use_rag,
             "timestamp": datetime.now().isoformat()
         }
         # Serialize message to JSON string

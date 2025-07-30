@@ -29,7 +29,7 @@ def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id:
             save_query_to_database(query_id, user_id, session_id, query, response)
             
             # Notify via WebSocket
-            notify_text_response_ready(tenant_id, user_id, query_id, query, response)
+            notify_text_response_ready(tenant_id, user_id, query_id, query, response, use_rag=use_rag)
             
             return {
                 "status": "success",
@@ -75,7 +75,7 @@ def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: st
             print(f"✅ [RAG] Generated: {response_text[:50]}...")
             
             # Step 2: Immediately notify WebSocket that text is ready
-            notify_text_response_ready(tenant_id, user_id, query_id, query, response_text)
+            notify_text_response_ready(tenant_id, user_id, query_id, query, response_text, use_rag=use_rag)
             
        
             audio_result = generate_tts_file(

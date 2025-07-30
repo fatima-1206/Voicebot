@@ -15,19 +15,26 @@ import signal
 import sys
 from concurrent.futures import ThreadPoolExecutor
 import datetime
+# import Dict
+import os
+from typing import Dict, Optional
 import httpx
+import uuid
 class VoicebotSTTClient:
     # replace localhost with 172.17.180.124 when running away from the server
     def __init__(self, host="localhost", port=8000, 
-                 tenant_id="cf670545-292c-49cc-af6c-798e7c786070",user_id="f19c393f-a23b-4337-88fa-71ca01733d62"):
+                 tenant_id="d7acb015-1ce6-451d-b253-d7455070b4b4",user_id="f00ce248-5a04-41f5-97ca-828d24ea265a"):
         self.host = host
         self.port = port
+        self.pending_queries: Dict[str, asyncio.Future] = {}
+
         self.token=None
         self.tenant_id = tenant_id
         self.user_id = user_id
         self.websocket_url = f"ws://{host}:{port}/ws/{tenant_id}/{user_id}"
         self.websocket = None
         self.recording = False
+        self.response_event = asyncio.Event()
         self.streaming = False
         self.audio_queue = queue.Queue(maxsize=100)
         self.stop_event = threading.Event()
@@ -117,27 +124,49 @@ class VoicebotSTTClient:
     async def submit_text_query(self):
         query = input("Enter your text query: ").strip()
         self.api_url = f"http://{self.host}:{self.port}"
+
         if not self.token:
-            self.token = input("Enter your API token: ").strip()
+            self.token = input("Enter your JWT access token: ").strip()
         if not query:
             print("❌ Query cannot be empty")
             return
+
         url = f"{self.api_url}/query/submit"
         payload = {
             "tenant_id": self.tenant_id,
             "user_id": self.user_id,
             "query": query,
-            "use_rag":self.rag
+            "use_rag": self.rag
         }
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(url, json=payload, headers=headers)
-                print(f"✅ Sent text-to-text request: {response.status_code}")
-            except Exception as e:
-                print(f"❌ Error sending text-to-text request: {e}")
-                return
+                if response.status_code != 200:
+                    print(f"❌ Server error: {response.status_code}")
+                    return
 
+                result = response.json()
+                query_id = result.get("query_id")
+                if not query_id:
+                    print("❌ No query_id returned from server.")
+                    return
+
+                # Create a future and wait for response
+                loop = asyncio.get_event_loop()
+                future = loop.create_future()
+                self.pending_queries[query_id] = future
+
+                print(f"📨 Query submitted. Waiting for response for query_id={query_id}...")
+                response_data = await asyncio.wait_for(future, timeout=30.0)
+                print(f"✅ Got response: {response_data}")
+
+            except asyncio.TimeoutError:
+                print("❌ Timed out waiting for response.")
+                self.pending_queries.pop(query_id, None)
+            except Exception as e:
+                print(f"❌ Error sending or receiving query: {e}")
 
 
 
@@ -195,6 +224,9 @@ class VoicebotSTTClient:
     
     async def stop_continuous_conversation(self):
         """Stop continuous conversation mode"""
+        # clear the buffer
+        self.audio_buffer = np.array([], dtype=np.int16)
+        self.chunk_counter = 0
         if not self.websocket:
             return
         
@@ -268,35 +300,66 @@ class VoicebotSTTClient:
         print("✅ Audio capture stopped")
     
     async def process_audio_chunks_continuously(self, duration=None):
-        """Process audio chunks continuously"""
+        """Process audio chunks continuously with improved buffer management"""
         start_time = time.time()
         last_send_time = start_time
-        
+
+        # Silence detection parameters
+        silence_threshold_db = -35  # dBFS, make configurable
+        max_silence_duration = 1.0  # seconds, make configurable
+        min_chunk_duration = 1.0    # seconds
+        max_chunk_duration = 3.0    # seconds
+
+        silence_threshold_lin = 10 ** (silence_threshold_db / 20)
+        silence_duration = 0.0
+        frames_collected = 0
+        buffer = []
+        sample_rate = self.sample_rate
+
+        def rms(audio):
+            """RMS stands for "Root Mean Square." In audio processing, it measures the average power (loudness) of an audio signal. It is calculated by squaring each sample, taking the mean of those squares, and then taking the square root. RMS is commonly used to detect silence or measure volume."""
+            audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
+            mean_square = np.mean(np.square(audio)) if len(audio) > 0 else 0.0
+            return np.sqrt(max(mean_square, 0.0))
+
         print("📡 Starting continuous audio processing...")
-        
+
         while self.streaming and not self.stop_event.is_set():
             current_time = time.time()
-            
-            # Check duration limit
             if duration and (current_time - start_time) >= duration:
                 print(f"\n⏰ Duration limit reached ({duration}s)")
                 break
-            
+
             try:
                 audio_chunk = self.audio_queue.get(timeout=0.05)
-                self.audio_buffer = np.concatenate([self.audio_buffer, audio_chunk])
-                
-                # Send when we have enough audio
-                should_send = len(self.audio_buffer) >= self.chunk_size
-                
-                if should_send:
-                    await self.send_audio_chunk(self.audio_buffer)
-                    
-                    # Clear buffer completely for next chunk
-                    self.audio_buffer = np.array([], dtype=np.int16)
+                mono_audio = audio_chunk.flatten()
+                buffer.append(mono_audio)
+                frames_collected += len(mono_audio)
+
+                block_rms = rms(mono_audio)
+                if block_rms < silence_threshold_lin:
+                    silence_duration += self.chunk_duration_ms / 1000.0
+                else:
+                    silence_duration = 0.0
+
+                chunk_ready = (
+                    frames_collected >=
+                    self.min_buffer_size and
+                    (silence_duration >= max_silence_duration or frames_collected >= self.max_buffer_size)
+                )
+
+                if chunk_ready:
+                    # Concatenate and send the buffered audio
+                    final_audio = np.concatenate(buffer)
+                    await self.send_audio_chunk(final_audio)
+
+                    # Reset for next chunk
+                    buffer = []
+                    frames_collected = 0
+                    silence_duration = 0.0
                     last_send_time = current_time
                     self.chunk_counter += 1
-            
+
             except queue.Empty:
                 await asyncio.sleep(0.01)
                 continue
@@ -307,55 +370,90 @@ class VoicebotSTTClient:
         print(f"✅ Audio processing complete")
     
     async def send_audio_chunk(self, audio_data, is_final=False):
-        """Send audio chunk via WebSocket using correct message type"""
+        """Send audio chunk via WebSocket using correct message type and return chunk_id"""
         try:
             audio_b64 = base64.b64encode(audio_data.tobytes()).decode('utf-8')
-            
-            # Use the correct message type that backend expects
+            chunk_id = str(uuid.uuid4())
             message = {
                 "type": "continuous_audio_stream",
-                "rag": self.rag,  # Enable RAG processing
+                "rag": self.rag,
                 "audio": audio_b64,
                 "sample_rate": self.sample_rate,
                 "channels": self.channels,
-                "conversation_mode": True,  # Enable conversation mode for auto-response
-                "auto_respond": True,       # Enable automatic responses
+                "conversation_mode": True,
+                "auto_respond": True,
                 "tts_language": "en",
                 "voice": "Fritz-PlayAI",
-                "timestamp": int(time.time() * 1000)
+                "timestamp": int(time.time() * 1000),
+                "chunk_id": chunk_id,
+                "final": is_final
             }
-            
             await self.websocket.send(json.dumps(message))
-            
+
+            # In send_audio_chunk, create a dict for each chunk_id:
+            loop = asyncio.get_event_loop()
+            future = loop.create_future()
+            self.pending_queries[chunk_id] = {
+                "transcription_result": None,
+                "text_response": None,
+                "tts": None,
+                "future": future
+            }
+
+            return chunk_id
         except Exception as e:
             print(f"❌ Error sending audio chunk: {e}")
+            return None
     
     async def listen_for_responses(self):
         """Listen for responses from WebSocket - CLI-style output"""
         if not self.websocket:
             print("❌ Not connected to WebSocket")
             return
-        
+
         try:
             async for message in self.websocket:
                 try:
                     data = json.loads(message)
-                    try:
-                        data = json.loads(message)
-                        if isinstance(data, dict) and "type" in data:
-                            message_type = data.get("type", "unknown")
-                        else:
-                            print(f"❌ Received non-dict message: {data}")
-                            message_type = "unknown"
-                    except Exception as e:
-                        print(f"❌ Error decoding message: {e}")
-                        message_type = "unknown"
-                    # Handle different message types with CLI-style formatting
+                    message_type = data.get("type", "unknown") if isinstance(data, dict) else "unknown"
+
+                    # --- NEW: Resolve futures for any message with chunk_id ---
+                    chunk_id = data.get("chunk_id")
+                    if chunk_id and chunk_id in self.pending_queries:
+                        entry = self.pending_queries[chunk_id]
+                        message_type = data.get("type", "unknown")
+                        if message_type == "transcription_result":
+                            entry["transcription_result"] = data
+                            await self.handle_transcription_result(data)
+                        elif message_type in ("query_result", "text_response"):
+                            entry["text_response"] = data
+                            await self.handle_query_response(data)
+                        elif message_type == "audio_status":
+                            entry["tts"] = data
+                            await self.handle_audio_status(data)
+                        # Check if all responses are present
+                        if all([entry["transcription_result"], entry["text_response"], entry["tts"]]):
+                            if not entry["future"].done():
+                                entry["future"].set_result(entry)
+                            self.pending_queries.pop(chunk_id)
+
+                    # --- Existing message type handling ---
                     if message_type == "transcription_result":
                         await self.handle_transcription_result(data)
+                    elif message_type in ("query_result", "query_with_tts_result", "text_response"):
+                        query_id = data.get("query_id")
+                        if query_id and query_id in self.pending_queries:
+                            future = self.pending_queries.pop(query_id)
+                            if not future.done():
+                                future.set_result(data)
+                                print(f"✅ [QUERY] Got response for {query_id[:8]}")
+                        else:
+                            print(f"🤖 [QUERY] {message_type}: {data}")
+
                     elif message_type == "speech_detected":
                         await self.handle_speech_detected(data)
-                        
+                    elif message_type == "query_result":
+                        await self.handle_query_response(data)
                     elif message_type == "query_with_tts_result":
                         await self.handle_query_response(data)
                         
@@ -398,12 +496,14 @@ class VoicebotSTTClient:
                         print("🏓 Pong received")
                         
                     else:
+                        # print(f"❓ Unknown message type: {message_type}")
                         # Don't show unknown messages as errors, backend may send other types
                         pass
                         
                 except json.JSONDecodeError:
                     print(f"❌ Invalid JSON received: {message}")
                 except Exception as e:
+                    print(data)
                     print(f"❌ Error processing message: {e}")
                     
         except websockets.exceptions.ConnectionClosed:
@@ -441,6 +541,7 @@ class VoicebotSTTClient:
     
     async def handle_query_response(self, data):
         """Handle query response - CLI format"""
+        
         response_text = data.get('response', 'N/A')
         query = data.get('query', 'N/A')
         timestamp = datetime.datetime.now().strftime('%H:%M:%S')
@@ -448,8 +549,89 @@ class VoicebotSTTClient:
         # Display like CLI
         print(f"🤖 Response: {response_text}")
        
-        # Show TTS processing like CLI
-        print(f"🗣 Speaking: {response_text[:50]}{'...' if len(response_text) > 50 else ''}")
+    async def record_till_keypress(self):
+        """Record audio until user presses Enter, then send the audio chunk."""
+        if not self.websocket:
+            print("❌ Not connected to WebSocket")
+            return
+
+        print("🎤 Recording... Press Enter to stop.")
+        self.recording = True
+        self.streaming = True
+        self.stop_event.clear()
+        self.audio_buffer = np.array([], dtype=np.int16)
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        # Start audio stream
+        try:
+            self.audio_stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                callback=self.audio_callback,
+                blocksize=self.chunk_size,
+                dtype='float32',
+                latency='low',
+                device=self.input_device
+            )
+            self.audio_stream.start()
+        except Exception as e:
+            print(f"❌ Failed to start recording: {e}")
+            self.recording = False
+            self.streaming = False
+            return
+
+        def wait_for_keypress():
+            input()  # Wait for Enter
+            self.stop_event.set()
+
+        keypress_thread = threading.Thread(target=wait_for_keypress)
+        keypress_thread.start()
+
+        buffer = []
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    audio_chunk = self.audio_queue.get(timeout=0.05)
+                    buffer.append(audio_chunk)
+                except queue.Empty:
+                    await asyncio.sleep(0.01)
+                    continue
+        finally:
+            self.audio_stream.stop()
+            self.audio_stream.close()
+            self.recording = False
+            self.streaming = False
+
+        if buffer:
+            final_audio = np.concatenate(buffer)
+            chunk_id = await self.send_audio_chunk(final_audio, is_final=True)
+            print("✅ Audio sent after keypress")
+            if chunk_id:
+                loop = asyncio.get_event_loop()
+                future = loop.create_future()
+                self.pending_queries[chunk_id] = {
+                    "transcription_result": None,
+                    "text_response": None,
+                    "tts": None,
+                    "future": future
+                }
+                print(f"⏳ Waiting for backend response for chunk_id={chunk_id}...")
+                try:
+                    response_data = await asyncio.wait_for(future, timeout=30.0)
+                    print(f"✅ Got response: {response_data}")
+                except asyncio.TimeoutError:
+                    print("❌ Timed out waiting for response.")
+                    self.pending_queries.pop(chunk_id, None)
+        else:
+            print("⚠️ No audio recorded")  
+
+
+
+
     async def handle_audio_status(self, data):
         """Handle TTS audio status"""
         status = data.get('status', 'N/A')
@@ -578,56 +760,53 @@ def signal_handler(signum, frame):
     print("\n🛑 Received interrupt signal, shutting down...")
     sys.exit(0)
 
+async def cli_loop(client):
+    print("\n🎯Voicebot Client:")
+    print("1. Voicecall")
+    print("2. Text Query")
+    print("3. Record till keypress")
+    print("4. turn rag off")       
+    print("5. turn rag on") 
+    print("6. Exit")
+    while True:
+        try:
+            choice = input("\nEnter your choice (1-4): ").strip()
+            if choice == "1":
+                await client.start_cli_style_pipeline()
+            elif choice == "2":
+                await client.submit_text_query()
+            elif choice == "3":
+                await client.record_till_keypress()
+            elif choice == "4":
+                client.rag = False
+                print("ℹ️ RAG processing disabled for voicecall")
+            elif choice == "5":
+                client.rag = True
+                print("ℹ️ RAG processing enabled for voicecall")
+            elif choice == "6":
+                print("👋 Exiting...")
+                break
+            else:
+                print("❌ Invalid choice, please try again")
+        except KeyboardInterrupt:
+            print("\n🛑 Interrupted by user")
+            break
+        except EOFError:
+            print("\n🛑 Input stream ended")
+            break
+
 async def main():
     signal.signal(signal.SIGINT, signal_handler)
-    
     client = VoicebotSTTClient()
-    
     try:
         if not await client.connect():
             return
-        
-        # Select input device
         client.select_input_device()
-        
-        # Start listening for responses in background
-        listen_task = asyncio.create_task(client.listen_for_responses())
-        
-        print("\n🎯Voicebot Client:")
-        print("1. Voicecall")
-        print("2. Text Query")
-        print("3. Exit")
-        print("4. turn rag off")       
-        print("5. turn rag on") 
-        while True:
-            try:
-                choice = input("\nEnter your choice (1-4): ").strip()
-                
-                if choice == "1":
-                    await client.start_cli_style_pipeline()
-                elif choice == "2":
-                    await client.submit_text_query()
-                elif choice == "3":
-                    print("👋 Exiting...")
-                    break
-                elif choice == "4":
-                    client.rag = False
-                    print("ℹ️ RAG processing disabled for voicecall")
-                elif choice == "5":
-                    client.rag = True
-                    print("ℹ️ RAG processing enabled for voicecall")
-                else:
-                    print("❌ Invalid choice, please try again")
-                    
-            except KeyboardInterrupt:
-                print("\n🛑 Interrupted by user")
-                break
-            except EOFError:
-                print("\n🛑 Input stream ended")
-                break
-        
-        listen_task.cancel()
-        
+        # Run both CLI and listener concurrently
+        await asyncio.gather(
+            client.listen_for_responses(),
+            cli_loop(client)
+        )
     except KeyboardInterrupt:
         print("\n🛑 Interrupted by user")
     except Exception as e:

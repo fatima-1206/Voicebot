@@ -56,7 +56,7 @@ def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id:
 def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: str, tenant_id: str, 
                             user_id: str, max_tokens: int = 500, temperature: float = 0.7, 
                             session_id: str = None, language: str = "en", voice: str = "",
-                            stream_audio: bool = True, use_rag: bool = True, fallback_on_error: bool = True):
+                            stream_audio: bool = True, use_rag: bool = True, chunk_id=None,fallback_on_error: bool = True):
     """
     Optimized task: Query → RAG → TTS → Stream Audio with fallback options
     This is the main pipeline for conversation responses
@@ -80,11 +80,11 @@ def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: st
             # Step 3: Process TTS with streaming
             if stream_audio:
                 audio_result = generate_and_stream_tts(
-                    response_text, tenant_id, user_id, tts_task_id, language, voice
+                    response_text, chunk_id=chunk_id, tenant_id=tenant_id, user_id=user_id, tts_task_id=tts_task_id, language=language, voice=voice
                 )
             else:
                 audio_result = generate_tts_file(
-                    response_text, tenant_id, user_id, tts_task_id, language, voice
+                    response_text, chunk_id=chunk_id, tenant_id=tenant_id, user_id=user_id, tts_task_id=tts_task_id, language=language, voice=voice
                 )
 
             # Step 4: Save query and response to database
@@ -93,6 +93,7 @@ def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: st
             return {
                 "status": "success",
                 "query_id": query_id,
+                "chunk_id": chunk_id,
                 "tts_task_id": tts_task_id,
                 "query": query,
                 "response": response_text,

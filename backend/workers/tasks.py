@@ -24,8 +24,7 @@ from backend.workers.utilities import (
 )
 
 from backend.workers.stt_tasks import (
-    bytes_to_numpy_audio,
-    should_respond_to_transcript
+    bytes_to_numpy_audio
 )
 
 from backend.workers.tts_tasks import (

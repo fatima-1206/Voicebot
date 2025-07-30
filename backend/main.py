@@ -9,8 +9,12 @@ from backend.documents.routes import router as documents_router
 from backend.query_processsing.routes import router as query_router
 from backend.tts.routes import router as tts_router
 from backend.ws_manager import manager, connection_monitor, health_monitor
+import wave
 from fastapi import WebSocket, WebSocketDisconnect
 import json
+import torch
+from backend.workers.stt_tasks import bytes_to_numpy_audio
+from backend.workers.stt_tasks import vad_model, sample_rate
 import base64
 import tempfile
 from backend.workers.tasks import transcribe_chunk
@@ -20,6 +24,7 @@ import time
 import redis
 import asyncio
 import threading
+import numpy as np
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
@@ -177,7 +182,7 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
             try:
                 await process_websocket_message(websocket, tenant_id, user_id, data)
             except Exception as e:
-                logger.error(f"❌ Error processing WebSocket message: {e}")
+                logger.error(f"❌ Error processing WebSocket message: {e}\b{data}")
                 await websocket.send_json({
                     "type": "error",
                     "message": f"Error processing message: {str(e)}"
@@ -195,8 +200,11 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
 
 async def process_websocket_message(websocket: WebSocket, tenant_id: str, user_id: str, data: dict):
     """Process individual WebSocket messages with improved error handling"""
-    
-    message_type = data.get("type")
+    if "type" in data:
+        message_type = data.get("type")
+    else:
+        message_type = "unknown"
+        print(f"❓ Unknown message type received: {data}")
     key = f"{tenant_id}_{user_id}"
     
     if message_type == "ping":
@@ -247,16 +255,63 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
             # Get buffer contents and clear it
             buffer_data = audio_buffer_manager.get_and_clear_buffer(key)
             
-            # Submit to Celery for processing
+
+            
+            # Submit to Celery for processing only if there is speech detected
+            # Apply VAD to detect speech segments
+            from backend.workers.stt_tasks import get_speech_timestamps
+            audio_data = bytes_to_numpy_audio(audio_bytes)
+            if audio_data is None or len(audio_data) == 0:
+                return {"status": "no_audio"}
+            
+            # Convert to tensor for VAD
+            audio_tensor = torch.from_numpy(audio_data).float()
+            audio_tensor = torch.clamp(audio_tensor, -1.0, 1.0)
+            
+            speech_timestamps = get_speech_timestamps(
+                audio_tensor, 
+                vad_model, 
+                sampling_rate=sample_rate,
+                threshold=0.2,
+                min_speech_duration_ms=200,  # Minimum 0.5s speech
+                min_silence_duration_ms=100,  # 0.3s silence to separate utterances
+                speech_pad_ms=50  # Add padding around speech
+            )
+        #    convert tensor back to bytes
+            audio_bytes = audio_tensor.numpy().astype(np.float32).tobytes()
+
+            # Save audio_bytes to a temporary WAV file for debugging or further processing
+
+            # wav_filename = os.path.join("/home/genesys/voicebot/Voicebot_fastapi/backend/temp/", f"{key}_{int(time.time())}.wav")
+            # try:
+            #     with wave.open(wav_filename, "wb") as wf:
+            #         int16_audio = np.clip(audio_tensor.numpy(), -1.0, 1.0)
+            #         int16_audio = (int16_audio * 32767).astype(np.int16)
+            #         audio_bytes = int16_audio.tobytes()
+
+            #         wf.setnchannels(1)
+            #         wf.setsampwidth(2)  # int16 = 2 bytes
+            #         wf.setframerate(sample_rate)
+            #         wf.writeframes(audio_bytes)
+            #     logger.info(f"Saved audio chunk to {wav_filename}")
+
+            # except Exception as e:
+            #     logger.error(f"Failed to save WAV file: {e}")
+            
+            int16_audio = np.clip(audio_tensor.numpy(), -1.0, 1.0)
+            int16_audio = (int16_audio * 32767).astype(np.int16)
+            audio_bytes = int16_audio.tobytes()
             from backend.workers.stt_tasks import process_continuous_audio_task
             process_continuous_audio_task.delay(
-                audio_bytes=buffer_data,
+                speech_bytes=audio_bytes,
+                speech_timestamps=speech_timestamps,
                 user_id=user_id,
                 tenant_id=tenant_id,
                 buffer_key=key,
                 tts_language=data.get("tts_language", "en"),
                 voice=data.get("voice", "Fritz-PlayAI"),
                 auto_respond=data.get("auto_respond", True),
+                chunk_id= data.get("chunk_id", str(uuid4())),
                 use_rag=data.get("rag", True) # Enable RAG processing if not specified
             )
     

@@ -210,7 +210,7 @@ def generate_tts_with_fallback(text: str, language: str, voice: str, output_path
 
 
 def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id: str, 
-                           language: str, voice: str) -> dict:
+                           language: str, voice: str, chunk_id: str=None) -> dict:
     """Generate TTS using Groq with gTTS fallback and stream via WebSocket"""
     
     try:
@@ -257,8 +257,9 @@ def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id
                 # Continue anyway, file is still available for download
             
             return {
-                "filename": filename, 
-                "file_size": result["file_size"], 
+                "filename": filename,
+                "chunk_id": chunk_id,
+                "file_size": result["file_size"],
                 "status": "success",
                 "provider": result["provider"],
                 "method": result["method"]
@@ -275,7 +276,7 @@ def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id
         raise e
 
 
-def generate_tts_file(text: str, tts_task_id: str, language: str, voice: str) -> dict:
+def generate_tts_file(text: str, tts_task_id: str, language: str, voice: str, chunk_id: str=None) -> dict:
     """Generate TTS file using Groq with gTTS fallback without streaming"""
     
     try:
@@ -296,6 +297,7 @@ def generate_tts_file(text: str, tts_task_id: str, language: str, voice: str) ->
             return {
                 "filename": filename,
                 "file_size": result["file_size"],
+                "chunk_id": chunk_id,
                 "status": "success",
                 "provider": result["provider"],
                 "method": result["method"]

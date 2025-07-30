@@ -53,37 +53,6 @@ def bytes_to_numpy_audio(audio_bytes: bytes) -> np.ndarray:
         return None
 
 
-def should_respond_to_transcript(transcript: str) -> bool:
-    return True # the rules at bottom aren't working well enough, so we just respond to everything for now
-    
-    """Determine if the transcript warrants an immediate response"""
-    if not transcript or len(transcript.strip()) < 3:
-        return False
-        
-    transcript = transcript.strip().lower()
-    
-    # Respond to questions
-    if transcript.endswith('?'):
-        return True
-        
-    # Respond to common conversation starters/phrases
-    conversation_triggers = [
-        'hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening',
-        'what is', 'tell me', 'how do', 'can you', 'please', 'help me',
-        'i need', 'i want', 'explain', 'show me', 'where is', 'when is',
-        'who is', 'why', 'how much', 'how many', 'thank you', 'thanks'
-    ]
-    
-    for trigger in conversation_triggers:
-        if trigger in transcript:
-            return True
-    
-    # Respond to complete sentences (basic check)
-    if len(transcript.split()) >= 4 and (transcript.endswith('.') or transcript.endswith('!')):
-        return True
-        
-    return False
-
 
 def send_transcription_result_via_websocket(tenant_id: str, user_id: str, chunk_id: str, 
                                           transcript: str, confidence: float, detected_language: str,
@@ -178,7 +147,7 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
         if device == 'cpu':
             segments, info = model.transcribe(audio_data, beam_size=1, language=language, task="transcribe")
         else:
-            segments, info = model.transcribe(audio_data, beam_size=5, language=language, task="transcribe", vad_filter=True)
+            segments, info = model.transcribe(audio_data, beam_size=5, language=language, task="transcribe", vad_filter=False)
         
         transcription_duration = time.time() - start_time
         
@@ -267,7 +236,9 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
     """
     try:
         audio_data = bytes_to_numpy_audio(audio_bytes)
-        
+        # store the audio data in a temporary file if needed
+
+
         # Use Whisper with streaming mode
         segments, info = model.transcribe(
             audio_data,
@@ -306,7 +277,7 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
             redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(result))
         
         # If final and should respond, trigger response generation
-        if is_final and should_respond_to_transcript(transcript):
+        if is_final:
             from backend.workers.query_tasks import process_query_with_tts_task
             process_query_with_tts_task.delay(
                 query_id=str(uuid4()),
@@ -331,75 +302,37 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
 
 
 @celery_app.task(name='process_continuous_audio', bind=True)
-def process_continuous_audio_task(self, audio_bytes: bytes, user_id: str, tenant_id: str, 
+def process_continuous_audio_task(self,speech_bytes, speech_timestamps, user_id: str, tenant_id: str, 
                                  buffer_key: str, tts_language: str = "en", 
-                                 voice: str = "en-US-JennyNeural", auto_respond: bool = True, use_rag: bool = True):
+                                 voice: str = "Fritz-PlayAI",chunk_id=None, auto_respond: bool = True, use_rag: bool = True):
     """
     Process continuous audio stream with server-side VAD
     Detects speech segments and triggers STT+RAG+TTS pipeline
     """
     print(f"🔄 [CONTINUOUS] Processing audio buffer for user {user_id}")
     
-    try:
-        # Convert bytes to numpy array
-        audio_data = bytes_to_numpy_audio(audio_bytes)
-        if audio_data is None or len(audio_data) == 0:
-            return {"status": "no_audio"}
+    try: 
+        print(f"   🔍 Found {len(speech_timestamps)} speech segments")
+        if not speech_timestamps:
+            return { "type": "status",
+                "status": "no_speech"}
         
-        # Convert to tensor for VAD
-        audio_tensor = torch.from_numpy(audio_data).float()
-        audio_tensor = torch.clamp(audio_tensor, -1.0, 1.0)
-        
-        # Apply VAD to detect speech segments
-        speech_timestamps = get_speech_timestamps(
-            audio_tensor, 
-            vad_model, 
-            sampling_rate=sample_rate,
-            threshold=0.2,
-            min_speech_duration_ms=200,  # Minimum 0.5s speech
-            min_silence_duration_ms=100,  # 0.3s silence to separate utterances
-            speech_pad_ms=50  # Add padding around speech
+
+        if not chunk_id:   
+            # Create unique chunk ID for this segment
+            chunk_id = f"{user_id}_{int(time.time() * 1000)}"
+            
+        segment_result = process_speech_segment(
+            speech_bytes, user_id, chunk_id, tenant_id,
+            tts_language, voice, auto_respond, use_rag=use_rag
         )
         
-        print(f"   🔍 Found {len(speech_timestamps)} speech segments")
-        
-        if not speech_timestamps:
-            return {"status": "no_speech"}
-        
-        # Process each speech segment
-        processed_segments = []
-        for i, speech_segment in enumerate(speech_timestamps):
-            start_sample = speech_segment['start']
-            end_sample = speech_segment['end']
-            
-            # Extract speech segment
-            speech_audio = audio_tensor[start_sample:end_sample]
-            
-            # Skip very short segments
-            duration = len(speech_audio) / sample_rate
-            if duration < 0.5:
-                continue
-            
-            print(f"   🗣️ Processing speech segment {i+1}: {duration:.1f}s")
-            
-            # Convert back to bytes for STT
-            speech_bytes = (speech_audio.numpy() * 32767).astype(np.int16).tobytes()
-            
-            # Create unique chunk ID for this segment
-            chunk_id = f"{user_id}_{int(time.time() * 1000)}_{i}"
-            
-            # Process this speech segment immediately
-            segment_result = process_speech_segment(
-                speech_bytes, user_id, chunk_id, tenant_id,
-                tts_language, voice, auto_respond, use_rag=use_rag
-            )
-            
-            processed_segments.append(segment_result)
         
         return {
             "status": "success",
-            "segments_processed": len(processed_segments),
-            "results": processed_segments
+            "segments_processed": len(segment_result),
+            "chunk_id": chunk_id,
+            "results": segment_result
         }
         
     except Exception as e:
@@ -422,14 +355,15 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
             beam_size=1,
             language="en",
             condition_on_previous_text=False,
-            vad_filter=False,  # We already did VAD
+            vad_filter=True,  # We already did VAD
             initial_prompt=None
         )
         
         # Extract transcript
         transcript_parts = []
         for segment in segments:
-            transcript_parts.append(segment.text.strip())
+            segment = profanity.censor(segment.text.strip())
+            transcript_parts.append(segment.strip())
         
         transcript = " ".join(transcript_parts).strip()
         
@@ -456,7 +390,7 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
             redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(stt_result))
         
         # Step 2: Check if we should respond
-        if auto_respond and should_respond_to_transcript(transcript):
+        if auto_respond:
             print(f"   🤖 Triggering response for: '{transcript}'")
             
             # Generate response immediately (don't delay this)
@@ -466,6 +400,7 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
             # Trigger RAG + TTS response
             from backend.workers.query_tasks import process_query_with_tts_task
             process_query_with_tts_task.delay(
+                chunk_id=chunk_id,
                 query_id=response_id,
                 tts_task_id=tts_task_id,
                 query=transcript,

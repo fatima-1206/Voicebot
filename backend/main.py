@@ -150,26 +150,24 @@ def validate_websocket_message(data: dict) -> tuple[bool, str]:
 
 @app.websocket("/ws/{tenant_id}/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str):
-    """Enhanced WebSocket endpoint with improved error handling and validation"""
-    
-    # Connect with improved connection manager
+    await websocket.accept()  # <-- Add this line
+    session_id = str(uuid4())
+    await websocket.send_json({"type": "session_id", "session_id": session_id})
+
     if not await manager.connect(tenant_id, user_id, websocket):
         return
-    
+
     try:
         while True:
-            # Receive messages from client with timeout
             try:
                 data = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
             except asyncio.TimeoutError:
-                # Send keep-alive ping
                 await websocket.send_json({"type": "ping", "timestamp": time.time()})
                 continue
             except Exception as e:
                 logger.error(f"❌ Error receiving WebSocket message: {e}")
                 break
-            
-            # Validate message
+
             is_valid, error_msg = validate_websocket_message(data)
             if not is_valid:
                 await websocket.send_json({
@@ -177,28 +175,25 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
                     "message": f"Invalid message: {error_msg}"
                 })
                 continue
-            
-            # Process message based on type
+
             try:
-                await process_websocket_message(websocket, tenant_id, user_id, data)
+                await process_websocket_message(websocket, tenant_id, user_id, data, session_id)
             except Exception as e:
-                logger.error(f"❌ Error processing WebSocket message: {e}\b{data}")
+                logger.error(f"❌ Error processing WebSocket message: {e}\n{data}")
                 await websocket.send_json({
                     "type": "error",
                     "message": f"Error processing message: {str(e)}"
                 })
-                
+
     except WebSocketDisconnect:
-        logger.info(f"🔌 WebSocket disconnected: {tenant_id}:{user_id}")
-    except Exception as e:
-        logger.error(f"❌ WebSocket error: {e}")
+        logger.info(f"🔌 WebSocket disconnected: {tenant_id}:{user_id}:{session_id}")
     finally:
-        # Clean up resources
-        key = f"{tenant_id}_{user_id}"
-        audio_buffer_manager.clear_buffer(key)
+        audio_buffer_manager.clear_buffer(session_id)
+        redis_manager.revoke_all_tasks(session_id)
         manager.disconnect(tenant_id, user_id)
 
-async def process_websocket_message(websocket: WebSocket, tenant_id: str, user_id: str, data: dict):
+
+async def process_websocket_message(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, session_id: str):
     """Process individual WebSocket messages with improved error handling"""
     if "type" in data:
         message_type = data.get("type")
@@ -206,38 +201,38 @@ async def process_websocket_message(websocket: WebSocket, tenant_id: str, user_i
         message_type = "unknown"
         print(f"❓ Unknown message type received: {data}")
     key = f"{tenant_id}_{user_id}"
-    
+
     if message_type == "ping":
         await websocket.send_json({"type": "pong", "timestamp": time.time()})
-    
+
     elif message_type == "continuous_audio_stream":
-        await handle_continuous_audio_stream(websocket, tenant_id, user_id, data, key)
-    
+        await handle_continuous_audio_stream(websocket, tenant_id, user_id, data, key, session_id)
+
     elif message_type == "start_continuous_conversation":
-        await handle_start_continuous_conversation(websocket, tenant_id, user_id, key)
-    
+        await handle_start_continuous_conversation(websocket, tenant_id, user_id, key, session_id)
+
     elif message_type == "stop_continuous_conversation":
-        await handle_stop_continuous_conversation(websocket, tenant_id, user_id, key)
-    
+        await handle_stop_continuous_conversation(websocket, tenant_id, user_id, key, session_id)
+
     elif message_type == "query":
-        await handle_query(websocket, tenant_id, user_id, data)
-    
+        await handle_query(websocket, tenant_id, user_id, data, session_id)
+
     elif message_type == "query_with_tts":
-        await handle_query_with_tts(websocket, tenant_id, user_id, data)
-    
+        await handle_query_with_tts(websocket, tenant_id, user_id, data, session_id)
+
     elif message_type == "audio_stream":
-        await handle_audio_stream(websocket, tenant_id, user_id, data, key)
-    
+        await handle_audio_stream(websocket, tenant_id, user_id, data, key, session_id)
+
     elif message_type == "audio_stream_end":
-        await handle_audio_stream_end(websocket, tenant_id, user_id, data, key)
-    
+        await handle_audio_stream_end(websocket, tenant_id, user_id, data, key, session_id)
+
     else:
         await websocket.send_json({
             "type": "error",
             "message": f"Unknown message type: {message_type}"
         })
 
-async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str):
+async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str):
     """Handle continuous audio stream with improved buffer management"""
     audio_chunk_base64 = data.get("audio")
     if not audio_chunk_base64:
@@ -280,24 +275,6 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
         #    convert tensor back to bytes
             audio_bytes = audio_tensor.numpy().astype(np.float32).tobytes()
 
-            # Save audio_bytes to a temporary WAV file for debugging or further processing
-
-            # wav_filename = os.path.join("/home/genesys/voicebot/Voicebot_fastapi/backend/temp/", f"{key}_{int(time.time())}.wav")
-            # try:
-            #     with wave.open(wav_filename, "wb") as wf:
-            #         int16_audio = np.clip(audio_tensor.numpy(), -1.0, 1.0)
-            #         int16_audio = (int16_audio * 32767).astype(np.int16)
-            #         audio_bytes = int16_audio.tobytes()
-
-            #         wf.setnchannels(1)
-            #         wf.setsampwidth(2)  # int16 = 2 bytes
-            #         wf.setframerate(sample_rate)
-            #         wf.writeframes(audio_bytes)
-            #     logger.info(f"Saved audio chunk to {wav_filename}")
-
-            # except Exception as e:
-            #     logger.error(f"Failed to save WAV file: {e}")
-            
             int16_audio = np.clip(audio_tensor.numpy(), -1.0, 1.0)
             int16_audio = (int16_audio * 32767).astype(np.int16)
             audio_bytes = int16_audio.tobytes()
@@ -321,7 +298,7 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
             "message": f"Error processing continuous audio: {str(e)}"
         })
 
-async def handle_start_continuous_conversation(websocket: WebSocket, tenant_id: str, user_id: str, key: str):
+async def handle_start_continuous_conversation(websocket: WebSocket, tenant_id: str, user_id: str, key: str, session_id: str):
     """Initialize continuous conversation mode"""
     audio_buffer_manager.clear_buffer(key)
     await websocket.send_json({
@@ -329,7 +306,7 @@ async def handle_start_continuous_conversation(websocket: WebSocket, tenant_id: 
         "message": "Ready for continuous conversation"
     })
 
-async def handle_stop_continuous_conversation(websocket: WebSocket, tenant_id: str, user_id: str, key: str):
+async def handle_stop_continuous_conversation(websocket: WebSocket, tenant_id: str, user_id: str, key: str, session_id: str):
     """Stop continuous conversation mode"""
     audio_buffer_manager.clear_buffer(key)
     await websocket.send_json({
@@ -337,7 +314,7 @@ async def handle_stop_continuous_conversation(websocket: WebSocket, tenant_id: s
         "message": "Continuous conversation stopped"
     })
 
-async def handle_query(websocket: WebSocket, tenant_id: str, user_id: str, data: dict):
+async def handle_query(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, session_id: str):
     """Handle regular query submission"""
     from backend.workers.tasks import process_query_task
     
@@ -368,7 +345,7 @@ async def handle_query(websocket: WebSocket, tenant_id: str, user_id: str, data:
         "message": "Query received and being processed..."
     })
 
-async def handle_query_with_tts(websocket: WebSocket, tenant_id: str, user_id: str, data: dict):
+async def handle_query_with_tts(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, session_id: str):
     """Handle query with TTS"""
     from backend.workers.tasks import process_query_with_tts_task
     
@@ -405,7 +382,7 @@ async def handle_query_with_tts(websocket: WebSocket, tenant_id: str, user_id: s
         "message": "Query with TTS received and being processed..."
     })
 
-async def handle_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str):
+async def handle_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str):
     """Handle audio stream with rolling buffer"""
     audio_chunk_base64 = data.get("audio")
     if not audio_chunk_base64:
@@ -469,7 +446,7 @@ async def handle_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str
             "message": f"Error processing audio chunk: {str(e)}"
         })
 
-async def handle_audio_stream_end(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str):
+async def handle_audio_stream_end(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str):
     """Handle end of audio stream"""
     conversation_mode = data.get("conversation_mode", False)
     

@@ -38,7 +38,7 @@
     "cuda": "mistralai/Mistral-7B-Instruct-v0.2"
   },
   
-  "max_new_tokens": 500,
+  "max_new_tokens": 400,
   "max_input_tokens": 1012,
   "temperature": 0.7,
 

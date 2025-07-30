@@ -9,6 +9,7 @@ import json
 from collections import defaultdict
 import time
 from backend.ws_manager import manager
+from backend.workers.celery_worker import celery_app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -102,6 +103,46 @@ class RedisManager:
         except Exception:
             self._handle_failure()
             return await self._local_fallback(channel, message)
+
+
+    def register_task(self, session_key: str, task_id: str):
+        """Track task_id for a given user (tenant_user_key)"""
+        try:
+            self.client.sadd(f"tasks:{session_key}", task_id)
+            self.client.expire(f"tasks:{session_key}", 3600)  # Optional: Auto-expire in 1 hour
+            logger.debug(f"📌 Task {task_id} registered for {session_key}")
+        except Exception as e:
+            logger.error(f"❌ Failed to register task {task_id} for {session_key}: {e}")
+
+    def get_user_tasks(self, session_key: str):
+        """Return all task_ids for a user"""
+        try:
+            return self.client.smembers(f"tasks:{session_key}")
+        except Exception as e:
+            logger.error(f"❌ Failed to get tasks for {session_key}: {e}")
+            return set()
+
+    def clear_user_tasks(self, session_key: str):
+        """Clear task tracking for a user"""
+        try:
+            self.client.delete(f"tasks:{session_key}")
+        except Exception as e:
+            logger.error(f"❌ Failed to clear tasks for {session_key}: {e}")
+
+    def revoke_all_tasks(self, session_key: str):
+        """Revoke all tracked tasks for a user"""
+        try:
+            task_ids = self.get_user_tasks(session_key)
+            control = celery_app.control
+            for task_id in task_ids:
+                control.revoke(task_id, terminate=True)
+                logger.info(f"🚫 Revoked task {task_id} for {session_key}")
+            self.clear_user_tasks(session_key)
+        except Exception as e:
+            logger.error(f"❌ Failed to revoke tasks for {session_key}: {e}")
+
+
+
 
 
 # Improved Redis listener with health monitoring and error recovery

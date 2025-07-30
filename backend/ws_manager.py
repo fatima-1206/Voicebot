@@ -109,17 +109,17 @@ class ConnectionManager:
     async def connect(self, tenant_id: str, user_id: str, websocket: WebSocket) -> bool:
         """Connect a WebSocket with improved validation and limits"""
         key = f"{tenant_id}:{user_id}"
-        
+
         async with self._async_lock:
             # Check connection limits per user
             if len(self.user_connections[user_id]) >= self.max_connections_per_user:
                 logger.warning(f"❌ Connection limit exceeded for user {user_id}")
                 await websocket.close(code=1008, reason="Connection limit exceeded")
                 return False
-            
+
             try:
-                await websocket.accept()
-                
+                # await websocket.accept()  # <-- REMOVE THIS LINE
+
                 # Store connection and metadata
                 self.active_connections[key] = websocket
                 self.connection_metadata[key] = {
@@ -130,13 +130,13 @@ class ConnectionManager:
                     "user_id": user_id
                 }
                 self.user_connections[user_id].add(key)
-                
+
                 # Update metrics
                 self.metrics.record_connection()
-                
+
                 logger.info(f"✅ WebSocket connected: {key} (Total: {len(self.active_connections)})")
                 return True
-                
+
             except Exception as e:
                 logger.error(f"❌ Error accepting WebSocket connection {key}: {e}")
                 return False

@@ -28,7 +28,7 @@ from backend.workers.stt_tasks import (
 )
 
 from backend.workers.tts_tasks import (
-    generate_and_stream_tts,
+
     generate_tts_file
 )
 

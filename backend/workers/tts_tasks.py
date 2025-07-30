@@ -13,44 +13,6 @@ from uuid import uuid4
 from gtts import gTTS
 
 
-async def stream_audio_file(tenant_id: str, user_id: str, file_path: str, task_id: str):
-    """Stream audio file content via WebSocket in chunks"""
-    if not redis_client:
-        return
-        
-    try:
-        # Read and encode audio file
-        with open(file_path, 'rb') as f:
-            audio_data = f.read()
-        
-        # Encode to base64 for transmission
-        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
-        
-        # Send audio stream message
-        message = {
-            "type": "audio_stream",
-            "task_id": task_id,
-            "audio_data": audio_base64,
-            "format": "wav",
-            "encoding": "base64",
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(message))
-        print(f"📡 [WS] Audio stream sent for task {task_id[:8]} ({len(audio_data)} bytes)")
-        
-    except Exception as e:
-        print(f"❌ Failed to stream audio file: {e}")
-        # Send error notification
-        error_message = {
-            "type": "audio_stream_error",
-            "task_id": task_id,
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }
-        redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(error_message))
-
-
 def generate_tts_with_groq(text: str, voice: str, output_path: str) -> tuple[bool, str]:
     """Generate TTS using Groq API"""
     global groq_client
@@ -114,8 +76,8 @@ def generate_tts_with_groq(text: str, voice: str, output_path: str) -> tuple[boo
         return False, f"Groq PlayAI - {str(e)}"
 
 
-def generate_tts_with_gtts(text: str, language: str, output_path: str) -> tuple[bool, str]:
-    """Generate TTS using Google TTS (gTTS) as fallback"""
+def generate_tts_with_tts2(text: str, language: str, output_path: str) -> tuple[bool, str]:
+    """Generate TTS using the fallback TTS which is chat TTS for now"""
     try:
         # Map language codes for gTTS
         gtts_language_map = {
@@ -189,8 +151,8 @@ def generate_tts_with_fallback(text: str, language: str, voice: str, output_path
     
     # Fallback to gTTS
     print("⚠️ [TTS] Groq failed, falling back to gTTS...")
-    success, provider = generate_tts_with_gtts(text, language, output_path)
-    
+    success, provider = generate_tts_with_tts2(text, language, output_path)
+
     if success:
         file_size = os.path.getsize(output_path)
         return {
@@ -207,73 +169,6 @@ def generate_tts_with_fallback(text: str, language: str, voice: str, output_path
         "file_size": 0,
         "method": "failed"
     }
-
-
-def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id: str, 
-                           language: str, voice: str, chunk_id: str=None) -> dict:
-    """Generate TTS using Groq with gTTS fallback and stream via WebSocket"""
-    
-    try:
-        # Generate filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"tts_{timestamp}_{tts_task_id[:8]}.wav"
-        output_dir = "backend/rag/temp_audioFiles"
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, filename)
-        
-        # Notify start
-        notify_audio_status(tenant_id, user_id, tts_task_id, "generating", 
-                          {"message": "Audio generation started"})
-        
-        print(f"🔄 [TTS] Generating audio with fallback: {text[:50]}...")
-        
-        # Generate audio with fallback
-        result = generate_tts_with_fallback(text, language, voice, output_path)
-        
-        if result["success"]:
-            print(f"✅ [TTS] Audio generated: {filename} using {result['provider']}")
-            
-            # Notify ready
-            notify_audio_status(tenant_id, user_id, tts_task_id, "ready", {
-                "filename": filename,
-                "file_size": result["file_size"],
-                "audio_url": f"/tts/download/{filename}",
-                "voice": voice,
-                "language": language,
-                "provider": result["provider"],
-                "method": result["method"]
-            })
-            
-            # Stream audio file via WebSocket
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(stream_audio_file(tenant_id, user_id, output_path, tts_task_id))
-                finally:
-                    loop.close()
-            except Exception as stream_error:
-                print(f"⚠️ [TTS] Audio streaming failed: {stream_error}")
-                # Continue anyway, file is still available for download
-            
-            return {
-                "filename": filename,
-                "chunk_id": chunk_id,
-                "file_size": result["file_size"],
-                "status": "success",
-                "provider": result["provider"],
-                "method": result["method"]
-            }
-        else:
-            raise Exception(f"Both TTS providers failed: {result['provider']}")
-        
-    except Exception as e:
-        print(f"❌ [TTS] Generation failed: {e}")
-        notify_audio_status(tenant_id, user_id, tts_task_id, "error", {
-            "error": str(e),
-            "provider": "TTS with fallback"
-        })
-        raise e
 
 
 def generate_tts_file(text: str, tts_task_id: str, language: str, voice: str, chunk_id: str=None) -> dict:
@@ -346,3 +241,4 @@ def process_tts_task(self, text: str, language: str, voice: str = "", output_fil
             "provider": "TTS with fallback",
             "worker": self.request.hostname
         }
+ 

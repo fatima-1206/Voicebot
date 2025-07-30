@@ -5,7 +5,7 @@ from backend.workers.celery_worker import celery_app
 from backend.workers.utilities import (
     manage_gpu_memory, notify_text_response_ready, notify_error, save_query_to_database
 )
-from backend.workers.tts_tasks import generate_and_stream_tts, generate_tts_file
+from backend.workers.tts_tasks import generate_tts_file
 from backend.response_generation.generator import generate_response
 from better_profanity import profanity
 
@@ -77,15 +77,10 @@ def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: st
             # Step 2: Immediately notify WebSocket that text is ready
             notify_text_response_ready(tenant_id, user_id, query_id, query, response_text)
             
-            # Step 3: Process TTS with streaming
-            if stream_audio:
-                audio_result = generate_and_stream_tts(
-                    response_text, chunk_id=chunk_id, tenant_id=tenant_id, user_id=user_id, tts_task_id=tts_task_id, language=language, voice=voice
-                )
-            else:
-                audio_result = generate_tts_file(
-                    response_text, chunk_id=chunk_id, tenant_id=tenant_id, user_id=user_id, tts_task_id=tts_task_id, language=language, voice=voice
-                )
+       
+            audio_result = generate_tts_file(
+                response_text, chunk_id=chunk_id, tenant_id=tenant_id, user_id=user_id, tts_task_id=tts_task_id, language=language, voice=voice
+            )
 
             # Step 4: Save query and response to database
             save_query_to_database(query_id, user_id, session_id, query, response_text)

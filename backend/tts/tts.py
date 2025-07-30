@@ -275,5 +275,3 @@ def test_tts():
             break
         time.sleep(1)
 
-# Uncomment to test
-# test_tts()

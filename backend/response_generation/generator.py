@@ -205,6 +205,8 @@ def generate_response(
 
         # This approach gives smarter responses in case the user hasn't uploaded any documents ---------------------------------------------
         # Filter by tenant_id and user_id
+        # print("DOCS BEFORE FILTERING:", len(docs))
+        # print(docs[:2])
         # only use the docs that are uploaded by the user or are public
         if docs:
             docs = [
@@ -212,6 +214,7 @@ def generate_response(
             if not doc.metadata  # Include docs with no metadata
             or doc.metadata.get("is_public")
             or doc.metadata.get("user_id") == user_id
+            or ("is_public" not in doc.metadata and "user_id" not in doc.metadata)
             ]
 
         # Compose context from filtered docs

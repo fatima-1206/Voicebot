@@ -99,3 +99,15 @@ class AudioBufferManager:
                 "max_buffer_size": self.max_buffer_size,
                 "max_idle_time": self.max_idle_time
             }
+    def move_last_speech_to_front(self, key: str, speech_segment: bytes):
+        """Move the last speech segment to the start of the buffer."""
+        with self._lock:
+            current_buffer = self.user_audio_buffers[key]
+            # Remove the last speech segment from the buffer and add it at the front
+            current_buffer.insert(0, speech_segment)  # Insert at the start
+
+            # Ensure the buffer doesn't exceed max size by trimming it
+            if len(current_buffer) > self.max_buffer_size:
+                current_buffer[:] = current_buffer[:self.max_buffer_size]  # Trim to max size
+
+            self.user_last_activity[key] = time.time()

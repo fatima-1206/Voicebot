@@ -232,6 +232,7 @@ async def process_websocket_message(websocket: WebSocket, tenant_id: str, user_i
             "message": f"Unknown message type: {message_type}"
         })
 
+
 async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str):
     """Handle continuous audio stream with improved buffer management"""
     audio_chunk_base64 = data.get("audio")
@@ -240,22 +241,20 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
     
     try:
         audio_bytes = base64.b64decode(audio_chunk_base64)
+        
+        # Append the new audio chunk to the buffer
         audio_buffer_manager.append_audio(key, audio_bytes)
         
-        # Only process if we have enough audio data
+        # Get the current buffer for the user
         current_buffer = audio_buffer_manager.get_buffer(key)
         min_process_size = 16000  # 1 second at 16kHz
         
+        # Check if the buffer has enough data to process (e.g., 1 second)
         if len(current_buffer) >= min_process_size:
-            # Get buffer contents and clear it
-            buffer_data = audio_buffer_manager.get_and_clear_buffer(key)
-            
-
-            
-            # Submit to Celery for processing only if there is speech detected
             # Apply VAD to detect speech segments
             from backend.workers.stt_tasks import get_speech_timestamps
-            audio_data = bytes_to_numpy_audio(audio_bytes)
+            audio_data = bytes_to_numpy_audio(current_buffer)
+            
             if audio_data is None or len(audio_data) == 0:
                 return {"status": "no_audio"}
             
@@ -263,6 +262,7 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
             audio_tensor = torch.from_numpy(audio_data).float()
             audio_tensor = torch.clamp(audio_tensor, -1.0, 1.0)
             
+            # Get speech timestamps using VAD
             speech_timestamps = get_speech_timestamps(
                 audio_tensor, 
                 vad_model, 
@@ -272,31 +272,40 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
                 min_silence_duration_ms=100,  # 0.3s silence to separate utterances
                 speech_pad_ms=50  # Add padding around speech
             )
-        #    convert tensor back to bytes
-            audio_bytes = audio_tensor.numpy().astype(np.float32).tobytes()
+            
+            # If speech is detected, move the last speech segment to the start of the buffer
+            if speech_timestamps:
+                # Get the last speech segment
+                last_speech_segment = current_buffer[speech_timestamps[-1][0]:speech_timestamps[-1][1]]
+                
+                # Move the last speech segment to the start of the buffer
+                audio_buffer_manager.move_last_speech_to_front(key, last_speech_segment)
+                
+                # Process the segments before the last speech segment (not including it)
+                buffer_data_to_process = current_buffer[:speech_timestamps[-1][0]]  # Get data before the last speech
 
-            int16_audio = np.clip(audio_tensor.numpy(), -1.0, 1.0)
-            int16_audio = (int16_audio * 32767).astype(np.int16)
-            audio_bytes = int16_audio.tobytes()
-            from backend.workers.stt_tasks import process_continuous_audio_task
-            process_continuous_audio_task.delay(
-                speech_bytes=audio_bytes,
-                speech_timestamps=speech_timestamps,
-                user_id=user_id,
-                tenant_id=tenant_id,
-                buffer_key=key,
-                tts_language=data.get("tts_language", "en"),
-                voice=data.get("voice", "Fritz-PlayAI"),
-                auto_respond=data.get("auto_respond", True),
-                chunk_id= data.get("chunk_id", str(uuid4())),
-                use_rag=data.get("rag", True) # Enable RAG processing if not specified
-            )
+                # Submit the buffer for processing (e.g., transcription)
+                from backend.workers.stt_tasks import process_continuous_audio_task
+                process_continuous_audio_task.delay(
+                    speech_bytes=buffer_data_to_process,
+                    speech_timestamps=speech_timestamps,
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    buffer_key=key,
+                    tts_language=data.get("tts_language", "en"),
+                    voice=data.get("voice", "Fritz-PlayAI"),
+                    auto_respond=data.get("auto_respond", True),
+                    chunk_id=data.get("chunk_id", str(uuid4())),
+                    use_rag=data.get("rag", True)
+                )
     
     except Exception as e:
         await websocket.send_json({
             "type": "error",
             "message": f"Error processing continuous audio: {str(e)}"
         })
+
+
 
 async def handle_start_continuous_conversation(websocket: WebSocket, tenant_id: str, user_id: str, key: str, session_id: str):
     """Initialize continuous conversation mode"""

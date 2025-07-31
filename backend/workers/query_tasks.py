@@ -52,6 +52,7 @@ def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id:
             }
 
 
+
 @celery_app.task(name='process_query_with_tts', bind=True)
 def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: str, tenant_id: str, 
                             user_id: str, max_tokens: int = 500, temperature: float = 0.7, 
@@ -79,10 +80,12 @@ def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: st
             
             # Step 3: Process TTS with streaming
             if stream_audio:
+                print("\n BOUT TO CALL GENERATE AND STREAM TTS")
                 audio_result = generate_and_stream_tts(
                     response_text, chunk_id=chunk_id, tenant_id=tenant_id, user_id=user_id, tts_task_id=tts_task_id, language=language, voice=voice
                 )
             else:
+                print("\n BOUT TO CALL GENERATE TTS FILE")
                 audio_result = generate_tts_file(
                     response_text, chunk_id=chunk_id, tenant_id=tenant_id, user_id=user_id, tts_task_id=tts_task_id, language=language, voice=voice
                 )

@@ -232,6 +232,7 @@ def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id
         
         if result["success"]:
             print(f"✅ [TTS] Audio generated: {filename} using {result['provider']}")
+
             
             # Notify ready
             notify_audio_status(tenant_id, user_id, tts_task_id, "ready", {
@@ -249,6 +250,7 @@ def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 try:
+                    print("\n Audio streaming successful")
                     loop.run_until_complete(stream_audio_file(tenant_id, user_id, output_path, tts_task_id))
                 finally:
                     loop.close()
@@ -280,6 +282,7 @@ def generate_tts_file(text: str, tts_task_id: str, language: str, voice: str, ch
     """Generate TTS file using Groq with gTTS fallback without streaming"""
     
     try:
+        print("\nGENERATING TTS FILE")
         # Generate filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"tts_{timestamp}_{tts_task_id[:8]}.wav"

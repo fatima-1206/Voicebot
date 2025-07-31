@@ -49,3 +49,4 @@ class UserResponse(BaseModel):
     display_name: Optional[str] = None  # Optional field for display name
     DoB: Optional[date] = None  # Optional field for date of birth
     gender: Optional[str] = None  # Optional
+    billing_plan: Optional[str] = None  # Optional field for billing plan name

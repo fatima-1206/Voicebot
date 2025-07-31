@@ -496,7 +496,7 @@ class VoicebotSTTClient:
                         print("🏓 Pong received")
                         
                     else:
-                        # print(f"❓ Unknown message type: {message_type}")
+                        print(f"Unknown message type: {message_type}")
                         # Don't show unknown messages as errors, backend may send other types
                         pass
                         
@@ -621,7 +621,7 @@ class VoicebotSTTClient:
                 }
                 print(f"⏳ Waiting for backend response for chunk_id={chunk_id}...")
                 try:
-                    response_data = await asyncio.wait_for(future, timeout=30.0)
+                    response_data = await asyncio.wait_for(future, timeout=90.0)
                     print(f"✅ Got response: {response_data}")
                 except asyncio.TimeoutError:
                     print("❌ Timed out waiting for response.")

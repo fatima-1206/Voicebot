@@ -369,7 +369,7 @@ async def handle_query_with_tts(websocket: WebSocket, tenant_id: str, user_id: s
         user_id=user_id,
         max_tokens=data.get("max_tokens", 500),
         temperature=data.get("temperature", 0.7),
-        session_id=data.get("session_id"),
+        session_id=data.get("session_id", None),
         language=data.get("language", "en"),
         voice=data.get("voice", ""),
         stream_audio=data.get("stream_audio", True)

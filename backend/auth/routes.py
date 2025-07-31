@@ -194,6 +194,9 @@ def get_user_info(
     if not db_user:
         raise HTTPException(status_code=404, detail="User not found")
     
+    tenant = db.query(models.Tenant).filter_by(id=db_user.tenant_id).first()
+    billing_plan_id = getattr(tenant, "billing_plan_id", None) if tenant else None
+    billing_plan = getattr(db.query(models.BillingPlan).filter_by(id=billing_plan_id).first(), "name", None) if billing_plan_id else None
     return UserResponse(
         id=db_user.id,
         tenant_id=db_user.tenant_id,
@@ -203,4 +206,6 @@ def get_user_info(
         is_admin=db_user.is_admin,
         display_name=db_user.display_name,
         DoB=db_user.dob,
-        gender=db_user.gender)
+        gender=db_user.gender,
+        billing_plan=billing_plan
+    )

@@ -8,7 +8,7 @@ from backend.workers.utilities import (
 from backend.workers.tts_tasks import generate_and_stream_tts, generate_tts_file
 from backend.response_generation.generator import generate_response
 from better_profanity import profanity
-
+from backend.workers.utilities import partial_censor    
 profanity.load_censor_words()
 
 @celery_app.task(name='process_query', bind=True)
@@ -23,8 +23,8 @@ def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id:
             # Generate response with RAG options
             response = generate_response(query, use_rag=use_rag, fallback_on_error=fallback_on_error,user_id=user_id, tenant_id=tenant_id)
             if response:
-                response = profanity.censor(response)  # Apply profanity filter
-            
+                response = partial_censor(response)  # Apply profanity filter
+
             # Save to database
             save_query_to_database(query_id, user_id, session_id, query, response)
             
@@ -69,7 +69,7 @@ def process_query_with_tts_task(self, query_id: str, tts_task_id: str, query: st
             # Step 1: Generate text response with RAG options
             response_text = generate_response(query, use_rag=use_rag, fallback_on_error=fallback_on_error)
             if response_text:
-                response_text = profanity.censor(response_text)  # Apply profanity filter
+                response_text = partial_censor(response_text)  # Apply profanity filter
             else:
                 print("   ❌ No response generated")
                 return {"status": "no_response", "query_id": query_id}

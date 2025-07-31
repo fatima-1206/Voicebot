@@ -15,6 +15,8 @@ from datetime import datetime
 from uuid import uuid4
 from silero_vad import get_speech_timestamps, collect_chunks
 from better_profanity import profanity
+from backend.workers.utilities import partial_censor
+
 
 profanity.load_censor_words()
 
@@ -167,7 +169,7 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
         full_transcript = " ".join(transcript_parts)
         # apply the profanity filter
         if full_transcript:
-            full_transcript = profanity.censor(full_transcript)
+            full_transcript = partial_censor(full_transcript)
         confidence = getattr(info, 'language_probability', 0.0)
         detected_language = getattr(info, 'language', 'unknown')
         
@@ -257,7 +259,7 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
         
         # apply the profanity filter
         if transcript:
-            transcript = profanity.censor(transcript)
+            transcript = partial_censor(transcript)
 
         # Send partial result immediately
         start_time = time.time()
@@ -362,7 +364,7 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
         # Extract transcript
         transcript_parts = []
         for segment in segments:
-            segment = profanity.censor(segment.text.strip())
+            segment = partial_censor(segment.text.strip())
             transcript_parts.append(segment.strip())
         
         transcript = " ".join(transcript_parts).strip()
@@ -371,7 +373,7 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
             print(f"   ❌ No transcript generated")
             return {"status": "no_transcript", "chunk_id": chunk_id}
         else:
-            transcript = profanity.censor(transcript)
+            transcript = partial_censor(transcript)
 
         print(f"   📝 Transcript: '{transcript}'")
         

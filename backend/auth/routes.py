@@ -137,13 +137,17 @@ def register_solo_user(data: RegisterSoloUserRequest, db: Session = Depends(get_
 @router.post("/login", response_model=TokenResponse)
 def login(data: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(models.User).filter_by(email=data.email).first()
+    tenant = db.query(models.Tenant).filter_by(id=user.tenant_id).first()
+    plan = db.query(models.BillingPlan).filter_by(id=tenant.billing_plan_id).first()
     if not user or not verify_password(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = create_access_token({
         "user_id": str(user.id),
         "tenant_id": str(user.tenant_id),
-        "is_admin": user.is_admin
+        "is_admin": user.is_admin,
+        "billing_plan": plan.name if plan else "free"  # Include billing plan in token
+
     })
     return TokenResponse(access_token=token)
 

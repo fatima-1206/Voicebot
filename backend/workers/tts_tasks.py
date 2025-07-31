@@ -12,7 +12,7 @@ from datetime import datetime
 from uuid import uuid4
 from gtts import gTTS
 from nltk.tokenize import sent_tokenize
-
+import edge_tts 
 
 async def stream_audio_file(tenant_id: str, user_id: str, file_path: str, task_id: str):
     """Stream audio file content via WebSocket in chunks"""
@@ -115,70 +115,57 @@ def generate_tts_with_groq(text: str, voice: str, output_path: str) -> tuple[boo
         return False, f"Groq PlayAI - {str(e)}"
 
 
-def generate_tts_with_gtts(text: str, language: str, output_path: str) -> tuple[bool, str]:
-    """Generate TTS using Google TTS (gTTS) as fallback"""
+async def generate_tts_with_ftts(text: str, language: str, output_path: str, voice='en-US-AndrewMultilingualNeural') -> tuple[bool, str]:
+    """Generate TTS using Edge TTS as fallback"""
     try:
-        # Map language codes for gTTS
-        gtts_language_map = {
-            "ur": "ur",  # Urdu
-            "en": "en",  # English
-            "es": "es",  # Spanish
-            "fr": "fr",  # French
-            "de": "de",  # German
-            "it": "it",  # Italian
-            "pt": "pt",  # Portuguese
-            "ru": "ru",  # Russian
-            "ja": "ja",  # Japanese
-            "ko": "ko",  # Korean
-            "zh": "zh",  # Chinese
-            "ar": "ar",  # Arabic
-            "hi": "hi",  # Hindi
+        # Edge TTS voice mapping (add more as needed)
+        edge_voice_map = {
+            "en": "en-US-AriaNeural",
+            "ur": "ur-PK-UzmaNeural",
+            "es": "es-ES-ElviraNeural",
+            "fr": "fr-FR-DeniseNeural",
+            "de": "de-DE-KatjaNeural",
+            "it": "it-IT-ElsaNeural",
+            "pt": "pt-BR-FranciscaNeural",
+            "ru": "ru-RU-SvetlanaNeural",
+            "ja": "ja-JP-NanamiNeural",
+            "ko": "ko-KR-SunHiNeural",
+            "zh": "zh-CN-XiaoxiaoNeural",
+            "ar": "ar-EG-SalmaNeural",
+            "hi": "hi-IN-SwaraNeural",
         }
-        
-        # Use mapped language or default to English
-        gtts_lang = gtts_language_map.get(language, "en")
-        
-        print(f"🔄 [TTS] Attempting gTTS generation (language: {gtts_lang})...")
-        
-        # Create gTTS object
-        tts_obj = gTTS(text=text, lang=gtts_lang, slow=False)
-        
-        # Save to temporary file first (gTTS saves as MP3)
-        temp_mp3_file = output_path.replace('.wav', '_temp.mp3')
-        tts_obj.save(temp_mp3_file)
-        
-        # Convert MP3 to WAV using ffmpeg
-        try:
-            subprocess.run([
-                'ffmpeg', '-i', temp_mp3_file, '-y', output_path
-            ], check=True, capture_output=True)
-            
-            # Clean up temporary MP3 file
-            os.remove(temp_mp3_file)
-            print(f"✅ [TTS] gTTS generation successful (converted to WAV)")
-            
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            # If ffmpeg is not available, rename MP3 to WAV
-            os.rename(temp_mp3_file, output_path)
-            print("⚠️ [TTS] gTTS successful (saved as MP3 with .wav extension - ffmpeg not available)")
-        
-        return True, "Google TTS (gTTS)"
-        
-    except Exception as e:
-        print(f"❌ [TTS] gTTS generation failed: {e}")
-        return False, f"Google TTS - {str(e)}"
+        edge_voice = edge_voice_map.get(language, "en-US-AriaNeural")
+        if voice:
+            edge_voice = voice  # Use provided voice if specified
 
+        print(f"🔄 [TTS] Attempting Edge TTS generation (voice: {edge_voice})...")
+
+        communicate = edge_tts.Communicate(text, voice=edge_voice)
+        with open(output_path, "wb") as out_file:
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    out_file.write(chunk["data"])
+
+        if os.path.exists(output_path):
+            print(f"✅ [TTS] Edge TTS generation successful")
+            return True, "Edge TTS"
+        else:
+            return False, "Edge TTS - File not created"
+    except Exception as e:
+        print(f"❌ [TTS] Edge TTS generation failed: {e}")
+        return False, f"Edge TTS - {str(e)}"
+    
+# ...existing code...
 
 def generate_tts_with_fallback(text: str, language: str, voice: str, output_path: str) -> dict:
-    """Generate TTS with Groq as primary and gTTS as fallback"""
-    
+    """Generate TTS with Groq as primary and Edge TTS as fallback"""
+
     # Set default voice for Groq if not provided
     if not voice:
         voice = "Fritz-PlayAI"
-    
-    # Try Groq first
+
     success, provider = generate_tts_with_groq(text, voice, output_path)
-    
+
     if success:
         file_size = os.path.getsize(output_path)
         return {
@@ -187,11 +174,16 @@ def generate_tts_with_fallback(text: str, language: str, voice: str, output_path
             "file_size": file_size,
             "method": "primary"
         }
-    
-    # Fallback to gTTS
-    print("⚠️ [TTS] Groq failed, falling back to gTTS...")
-    success, provider = generate_tts_with_gtts(text, language, output_path)
-    
+
+    # Fallback to Edge TTS
+    print("⚠️ [TTS] Groq failed, falling back to Edge TTS...")
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        success, provider = loop.run_until_complete(generate_tts_with_ftts(text, language, output_path))
+    finally:
+        loop.close()
+
     if success:
         file_size = os.path.getsize(output_path)
         return {
@@ -200,21 +192,19 @@ def generate_tts_with_fallback(text: str, language: str, voice: str, output_path
             "file_size": file_size,
             "method": "fallback"
         }
-    
+
     # Both failed
     return {
         "success": False,
-        "provider": "None - Both Groq and gTTS failed",
+        "provider": "None - Both Groq and Edge TTS failed",
         "file_size": 0,
         "method": "failed"
     }
 
-
-
 def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id: str, 
                            language: str, voice: str, chunk_id: str=None) -> dict:
-    """Generate TTS using Groq with gTTS fallback and stream via WebSocket"""
-    
+    """Generate TTS using Groq with Edge TTS fallback and stream via WebSocket"""
+
     try:
         # scentence tokenize the text response
         print("\nGENERATING AND STREAMING TTS")

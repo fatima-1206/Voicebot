@@ -248,17 +248,7 @@ def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id
             if result["success"]:
                 print(f"✅ [TTS] Audio generated: {filename} using {result['provider']}")
 
-                # Notify ready
-                # notify_audio_status(tenant_id, user_id, tts_task_id, "ready", {
-                #     "filename": filename,
-                #     "file_size": result["file_size"],
-                #     "audio_url": f"/tts/download/{filename}",
-                #     "voice": voice,
-                #     "language": language,
-                #     "provider": result["provider"],
-                #     "method": result["method"]
-                # })
-                
+               
                 # Stream audio file via WebSocket
                 try:
                     loop = asyncio.new_event_loop()

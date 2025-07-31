@@ -414,7 +414,7 @@ class VoicebotSTTClient:
         try:
             async for message in self.websocket:
                 data = json.loads(message)
-                print(data)
+                # print(data)
                 try:
 
                     message_type = data.get("type", "unknown") if isinstance(data, dict) else "unknown"

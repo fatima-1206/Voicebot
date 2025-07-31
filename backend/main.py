@@ -280,10 +280,11 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
                 
                 # Move the last speech segment to the start of the buffer
                 audio_buffer_manager.move_last_speech_to_front(key, last_speech_segment)
-                
-                # Process the segments before the last speech segment (not including it)
-                buffer_data_to_process = current_buffer[:speech_timestamps[-1][0]]  # Get data before the last speech
-
+                if len(speech_timestamps)>1:
+                    # Process the segments before the last speech segment (not including it)
+                    buffer_data_to_process = current_buffer[:speech_timestamps[-1][0]]  # Get data before the last speech
+                else:
+                    buffer_data_to_process = current_buffer
                 # Submit the buffer for processing (e.g., transcription)
                 from backend.workers.stt_tasks import process_continuous_audio_task
                 process_continuous_audio_task.delay(

@@ -136,7 +136,6 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
 .envrc
 .venv
 env/
@@ -225,3 +224,5 @@ var/run/
 context.txt
 chat.txt
 transcription.txt
+config.bat
+node_modules

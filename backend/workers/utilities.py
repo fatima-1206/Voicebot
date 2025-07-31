@@ -1,6 +1,7 @@
 """
 Shared utilities, configurations and context managers for Celery tasks with improved error handling
 """
+from better_profanity import profanity
 import torch
 import gc
 import redis
@@ -26,6 +27,36 @@ sample_rate = 16000
 model = None
 vad_model = None
 groq_client = None
+profanity.load_censor_words()
+
+
+def partial_censor(text):
+    words = text.split()
+    censored_words = []
+    for word in words:
+        # Separate word from punctuation (including quotes) for accurate censoring
+        import re
+        match = re.match(r"^([\"']?[a-zA-Z]+[\"']?)([.,!?<>\”\"\'?]*)$", word)
+        if match:
+            base_word = match.group(1)
+            punctuation = match.group(2)
+        else:
+            base_word = word
+            punctuation = ""
+        # Remove surrounding quotes for profanity check
+        clean = base_word.strip("\"'")
+        if profanity.contains_profanity(clean.lower()):
+            if len(clean) <= 2:
+                censored = '*' * len(clean)
+            else:
+                censored = clean[0] + ('*' * (len(clean) - 2)) + clean[-1]
+            # Re-wrap censored word with original quotes
+            censored = base_word.replace(clean, censored)
+            censored_words.append(censored + punctuation)
+        else:
+            censored_words.append(word)
+    return ' '.join(censored_words)
+
 
 def initialize_models():
     """Initialize AI models with proper error handling"""
@@ -201,7 +232,7 @@ def safe_redis_publish(channel: str, message: dict, max_retries: int = 3) -> boo
         logger.error(f"❌ Failed to publish to Redis channel {channel}: {e}")
         return False
 
-def notify_audio_status(tenant_id: str, user_id: str, task_id: str, status: str, data: dict) -> bool:
+def notify_audio_status(tenant_id: str, user_id: str, task_id: str, number_of_scentences:int, status: str, data: dict) -> bool:
     """Notify audio status via WebSocket with improved error handling"""
     try:
         message = {
@@ -209,6 +240,7 @@ def notify_audio_status(tenant_id: str, user_id: str, task_id: str, status: str,
             "task_id": task_id,
             "status": status,
             "data": data,
+            "scentences": number_of_scentences,
             "timestamp": datetime.now().isoformat()
         }
         

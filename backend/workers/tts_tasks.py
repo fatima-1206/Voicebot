@@ -11,8 +11,11 @@ import subprocess
 from datetime import datetime
 from uuid import uuid4
 from gtts import gTTS
-
-
+from nltk.tokenize import sent_tokenize
+import edge_tts 
+from backend.db.models import Tenant, BillingPlan
+from backend.db.connection import SessionLocal
+from backend.auth.jwt_ import get_current_user
 async def stream_audio_file(tenant_id: str, user_id: str, file_path: str, task_id: str):
     """Stream audio file content via WebSocket in chunks"""
     if not redis_client:
@@ -114,83 +117,103 @@ def generate_tts_with_groq(text: str, voice: str, output_path: str) -> tuple[boo
         return False, f"Groq PlayAI - {str(e)}"
 
 
-def generate_tts_with_gtts(text: str, language: str, output_path: str) -> tuple[bool, str]:
-    """Generate TTS using Google TTS (gTTS) as fallback"""
+async def generate_tts_with_ftts(text: str, language: str, output_path: str, voice='en-US-AndrewMultilingualNeural') -> tuple[bool, str]:
+    """Generate TTS using Edge TTS as fallback"""
     try:
-        # Map language codes for gTTS
-        gtts_language_map = {
-            "ur": "ur",  # Urdu
-            "en": "en",  # English
-            "es": "es",  # Spanish
-            "fr": "fr",  # French
-            "de": "de",  # German
-            "it": "it",  # Italian
-            "pt": "pt",  # Portuguese
-            "ru": "ru",  # Russian
-            "ja": "ja",  # Japanese
-            "ko": "ko",  # Korean
-            "zh": "zh",  # Chinese
-            "ar": "ar",  # Arabic
-            "hi": "hi",  # Hindi
+        # Edge TTS voice mapping (add more as needed)
+        edge_voice_map = {
+            "en": "en-US-AriaNeural",
+            "ur": "ur-PK-UzmaNeural",
+            "es": "es-ES-ElviraNeural",
+            "fr": "fr-FR-DeniseNeural",
+            "de": "de-DE-KatjaNeural",
+            "it": "it-IT-ElsaNeural",
+            "pt": "pt-BR-FranciscaNeural",
+            "ru": "ru-RU-SvetlanaNeural",
+            "ja": "ja-JP-NanamiNeural",
+            "ko": "ko-KR-SunHiNeural",
+            "zh": "zh-CN-XiaoxiaoNeural",
+            "ar": "ar-EG-SalmaNeural",
+            "hi": "hi-IN-SwaraNeural",
         }
-        
-        # Use mapped language or default to English
-        gtts_lang = gtts_language_map.get(language, "en")
-        
-        print(f"🔄 [TTS] Attempting gTTS generation (language: {gtts_lang})...")
-        
-        # Create gTTS object
-        tts_obj = gTTS(text=text, lang=gtts_lang, slow=False)
-        
-        # Save to temporary file first (gTTS saves as MP3)
-        temp_mp3_file = output_path.replace('.wav', '_temp.mp3')
-        tts_obj.save(temp_mp3_file)
-        
-        # Convert MP3 to WAV using ffmpeg
-        try:
-            subprocess.run([
-                'ffmpeg', '-i', temp_mp3_file, '-y', output_path
-            ], check=True, capture_output=True)
-            
-            # Clean up temporary MP3 file
-            os.remove(temp_mp3_file)
-            print(f"✅ [TTS] gTTS generation successful (converted to WAV)")
-            
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            # If ffmpeg is not available, rename MP3 to WAV
-            os.rename(temp_mp3_file, output_path)
-            print("⚠️ [TTS] gTTS successful (saved as MP3 with .wav extension - ffmpeg not available)")
-        
-        return True, "Google TTS (gTTS)"
-        
+        edge_voice = edge_voice_map.get(language, "en-US-AriaNeural")
+        if voice:
+            edge_voice = voice  # Use provided voice if specified
+
+        print(f"🔄 [TTS] Attempting Edge TTS generation (voice: {edge_voice})...")
+
+        communicate = edge_tts.Communicate(text, voice=edge_voice)
+        with open(output_path, "wb") as out_file:
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    out_file.write(chunk["data"])
+
+        if os.path.exists(output_path):
+            print(f"✅ [TTS] Edge TTS generation successful")
+            return True, "Edge TTS"
+        else:
+            return False, "Edge TTS - File not created"
     except Exception as e:
-        print(f"❌ [TTS] gTTS generation failed: {e}")
-        return False, f"Google TTS - {str(e)}"
+        print(f"❌ [TTS] Edge TTS generation failed: {e}")
+        return False, f"Edge TTS - {str(e)}"
+    
+# ...existing code...
+def get_billing_plan_from_db(tenant_id: str) -> str:
+    """Get user's billing plan from the database"""
+    db = SessionLocal()
+    billing_plan = "Free"  # Default plan
+
+    try:
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if tenant and tenant.billing_plan_id:
+            billing_plan_id = tenant.billing_plan_id
+            if billing_plan_id:
+                billing_plan = db.query(BillingPlan).filter(BillingPlan.id == billing_plan_id).first()
+                if billing_plan:
+                    return billing_plan.name
+    except Exception as e:
+        print(f"❌ [DB] Error fetching billing plan: {e}")
+        return "Free"
+    finally:
+        db.close()
+    return billing_plan
+
+def generate_tts_with_fallback(tenant_id:str ,text: str, language: str, voice: str, output_path: str) -> dict:
+    """Generate TTS with Groq as primary and Edge TTS as fallback"""
 
 
-def generate_tts_with_fallback(text: str, language: str, voice: str, output_path: str) -> dict:
-    """Generate TTS with Groq as primary and gTTS as fallback"""
+    # first get the user's billing plan. if they have a premium plan, use Groq, otherwise use Edge TTS
+    # query the database to get the tenant's billing plan
+   
+    billing_plan = get_billing_plan_from_db(tenant_id)
+
+    print(f"\nTHE USERS BILLING PLAN ISSSS {billing_plan}")
+    if billing_plan and billing_plan == "Pro":
+        # Set default voice for Groq if not provided
+        if not voice:
+            voice = "Fritz-PlayAI"
+
+        success, provider = generate_tts_with_groq(text, voice, output_path)
+
+        if success:
+            file_size = os.path.getsize(output_path)
+            return {
+                "success": True,
+                "provider": provider,
+                "file_size": file_size,
+                "method": "primary"
+            }
+
+        # Fallback to Edge TTS
+        print("⚠️ [TTS] Groq failed, falling back to Edge TTS...")
     
-    # Set default voice for Groq if not provided
-    if not voice:
-        voice = "Fritz-PlayAI"
-    
-    # Try Groq first
-    success, provider = generate_tts_with_groq(text, voice, output_path)
-    
-    if success:
-        file_size = os.path.getsize(output_path)
-        return {
-            "success": True,
-            "provider": provider,
-            "file_size": file_size,
-            "method": "primary"
-        }
-    
-    # Fallback to gTTS
-    print("⚠️ [TTS] Groq failed, falling back to gTTS...")
-    success, provider = generate_tts_with_gtts(text, language, output_path)
-    
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        success, provider = loop.run_until_complete(generate_tts_with_ftts(text, language, output_path))
+    finally:
+        loop.close()
+
     if success:
         file_size = os.path.getsize(output_path)
         return {
@@ -199,77 +222,68 @@ def generate_tts_with_fallback(text: str, language: str, voice: str, output_path
             "file_size": file_size,
             "method": "fallback"
         }
-    
+
     # Both failed
     return {
         "success": False,
-        "provider": "None - Both Groq and gTTS failed",
+        "provider": "None - Both Groq and Edge TTS failed",
         "file_size": 0,
         "method": "failed"
     }
 
-
 def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id: str, 
                            language: str, voice: str, chunk_id: str=None) -> dict:
-    """Generate TTS using Groq with gTTS fallback and stream via WebSocket"""
-    
+    """Generate TTS using Groq with Edge TTS fallback and stream via WebSocket"""
+
     try:
-        # Generate filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"tts_{timestamp}_{tts_task_id[:8]}.wav"
-        output_dir = "backend/rag/temp_audioFiles"
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, filename)
-        
-        # Notify start
-        notify_audio_status(tenant_id, user_id, tts_task_id, "generating", 
-                          {"message": "Audio generation started"})
-        
-        print(f"🔄 [TTS] Generating audio with fallback: {text[:50]}...")
-        
-        # Generate audio with fallback
-        result = generate_tts_with_fallback(text, language, voice, output_path)
-        
-        if result["success"]:
-            print(f"✅ [TTS] Audio generated: {filename} using {result['provider']}")
+        # scentence tokenize the text response
+        print("\nGENERATING AND STREAMING TTS")
+        sentences = sent_tokenize(text)
+        for i, sentence in enumerate(sentences):
+            # Notify start for first sentence
+            if i == 0:
+                notify_audio_status(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    task_id=tts_task_id,
+                    number_of_scentences=len(sentences),
+                    status="generating",
+                    data={
+                        "message": "Audio generation started",
+                        "number_of_sentences": len(sentences)
+                    }
+                )
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"tts_{timestamp}_{tts_task_id[:8]}_{i}.wav"
+            output_dir = "backend/rag/temp_audioFiles"
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, filename)
             
-            # Notify ready
-            notify_audio_status(tenant_id, user_id, tts_task_id, "ready", {
-                "filename": filename,
-                "file_size": result["file_size"],
-                "audio_url": f"/tts/download/{filename}",
-                "voice": voice,
-                "language": language,
-                "provider": result["provider"],
-                "method": result["method"]
-            })
+            print(f"🔄 [TTS] Generating audio for sentence: {sentence[:50]}...")
             
-            # Stream audio file via WebSocket
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+            # Generate audio with fallback
+            result = generate_tts_with_fallback(tenant_id, sentence, language, voice, output_path)
+            
+            if result["success"]:
+                print(f"✅ [TTS] Audio generated: {filename} using {result['provider']}")
+
+               
+                # Stream audio file via WebSocket
                 try:
-                    loop.run_until_complete(stream_audio_file(tenant_id, user_id, output_path, tts_task_id))
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(stream_audio_file(tenant_id, user_id, output_path, f"{tts_task_id}_{i}"))
                 finally:
                     loop.close()
-            except Exception as stream_error:
-                print(f"⚠️ [TTS] Audio streaming failed: {stream_error}")
-                # Continue anyway, file is still available for download
-            
-            return {
-                "filename": filename,
-                "chunk_id": chunk_id,
-                "file_size": result["file_size"],
-                "status": "success",
-                "provider": result["provider"],
-                "method": result["method"]
-            }
-        else:
-            raise Exception(f"Both TTS providers failed: {result['provider']}")
-        
+
+        return {
+            "status": "success",
+            "message": f"Successfully generated and streamed {len(sentences)} sentence(s)."
+        }
     except Exception as e:
         print(f"❌ [TTS] Generation failed: {e}")
-        notify_audio_status(tenant_id, user_id, tts_task_id, "error", {
+        notify_audio_status(tenant_id=tenant_id, user_id=user_id, number_of_scentences=len(sentences),task_id= tts_task_id, status="error", data={
             "error": str(e),
             "provider": "TTS with fallback"
         })
@@ -280,6 +294,7 @@ def generate_tts_file(text: str, tts_task_id: str, language: str, voice: str, ch
     """Generate TTS file using Groq with gTTS fallback without streaming"""
     
     try:
+        print("\nGENERATING TTS FILE")
         # Generate filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"tts_{timestamp}_{tts_task_id[:8]}.wav"
@@ -290,8 +305,8 @@ def generate_tts_file(text: str, tts_task_id: str, language: str, voice: str, ch
         print(f"🔄 [TTS] Generating audio file with fallback: {text[:50]}...")
         
         # Generate audio with fallback
-        result = generate_tts_with_fallback(text, language, voice, output_path)
-        
+        result = generate_tts_with_fallback(tenant_id=tenant_id, text=text, language=language, voice=voice, output_path=output_path)
+
         if result["success"]:
             print(f"✅ [TTS] File generated: {filename} ({result['file_size']} bytes) using {result['provider']}")
             return {

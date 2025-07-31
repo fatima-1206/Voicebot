@@ -20,6 +20,7 @@ class UserTokenData(BaseModel):
     user_id: str
     tenant_id: str
     is_admin: bool
+    billing_plan: str
 
 def create_access_token(data: dict):
     to_encode = data.copy()
@@ -33,7 +34,8 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         return UserTokenData(
             user_id=payload["user_id"],
             tenant_id=payload["tenant_id"],
-            is_admin=payload["is_admin"]
+            is_admin=payload["is_admin"],
+            billing_plan=payload["billing_plan"]  # Include billing_plan
         )
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")

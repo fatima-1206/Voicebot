@@ -7,6 +7,7 @@ from langchain.chains import RetrievalQA
 from langchain.schema import Document
 from typing import Optional
 from better_profanity import profanity
+from backend.workers.utilities import partial_censor
 
 # Global variables for model and tokenizer
 model = None
@@ -189,7 +190,7 @@ def generate_response(
         print("🔄 Using LLM without RAG (user preference)")
         try:
             response = call_llm_no_rag(query)
-            return profanity.censor(response) if response else "I apologize, but I couldn't generate a response."
+            return partial_censor(response) if response else "I apologize, but I couldn't generate a response."
         except Exception as e:
             print(f"❌ Error in LLM-only mode: {e}")
             return "I apologize, but I'm having technical difficulties and cannot generate a response right now."
@@ -220,7 +221,7 @@ def generate_response(
         # Compose context from filtered docs
         context = "\n".join([doc.page_content for doc in docs])
         response = call_llm(query, context)
-        return profanity.censor(response) if response else "I apologize, but I couldn't generate a response."
+        return partial_censor(response) if response else "I apologize, but I couldn't generate a response."
 
     except Exception as e:
         print(f"❌ Error in RAG pipeline: {e}")
@@ -229,7 +230,7 @@ def generate_response(
             try:
                 response = call_llm_no_rag(query)
                 if response and response.strip():
-                    return profanity.censor(response)
+                    return partial_censor(response)
                 else:
                     return "I apologize, but I couldn't generate a proper response to your question."
             except Exception as fallback_error:
@@ -291,13 +292,13 @@ def test_response_generation():
     query = "If you don't know the answer just say so. here is my question: What is the dress code for students at FAST University?"
     print("Query:", query)
     result = rag_chain.invoke({"query": query})
-    result = profanity.censor(result["result"]) if result and "result" in result else "No answer found."
+    result = partial_censor(result["result"]) if result and "result" in result else "No answer found."
     print("💬 Answer:", result)
     print("\n")
     
     query = "Answer this in urdu. If you don't know the answer just say that you don't know. Question: اگر آپ کو جواب نہیں معلوم تو بس اتنا کہہ دیں۔ میرا سوال یہ ہے: فاسٹ یونیورسٹی میں طلباء کے لیے ڈریس کوڈ کیا ہے؟"
     print("Query:", query)
-    result = profanity.censor(result["result"]) if result and "result" in result else "No answer found."
+    result = partial_censor(result["result"]) if result and "result" in result else "No answer found."
     print("💬 Answer:", result)
 
 # For Celery worker initialization

@@ -383,69 +383,7 @@ async def handle_query_with_tts(websocket: WebSocket, tenant_id: str, user_id: s
     })
 
 async def handle_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str):
-    """Handle audio stream with rolling buffer"""
-    audio_chunk_base64 = data.get("audio")
-    if not audio_chunk_base64:
-        return
-    
-    conversation_mode = data.get("conversation_mode", False)
-    
-    try:
-        audio_bytes = base64.b64decode(audio_chunk_base64)
-        audio_buffer_manager.append_audio(key, audio_bytes)
-        
-        # Rolling buffer configuration
-        if conversation_mode:
-            buffer_size = data.get("buffer_size", 16000)
-            overlap_size = data.get("overlap_size", 4000)
-        else:
-            buffer_size = data.get("buffer_size", 32000)
-            overlap_size = data.get("overlap_size", 8000)
-        
-        current_buffer = audio_buffer_manager.get_buffer(key)
-        if len(current_buffer) >= buffer_size:
-            transcription_id = str(uuid4())
-            
-            # Get buffer data for processing
-            buffer_data = bytes(current_buffer)
-            
-            # Choose task based on conversation mode
-            if conversation_mode:
-                from backend.workers.tasks import transcribe_and_respond_task
-                transcribe_and_respond_task.delay(
-                    audio_bytes=buffer_data,
-                    user_id=user_id,
-                    chunk_id=transcription_id,
-                    tenant_id=tenant_id,
-                    conversation_mode=True,
-                    tts_language=data.get("tts_language", "en"),
-                    voice=data.get("voice", ""),
-                    auto_respond=data.get("auto_respond", True)
-                )
-            else:
-                transcribe_chunk.delay(
-                    audio_bytes=buffer_data,
-                    user_id=user_id,
-                    chunk_id=transcription_id,
-                    tenant_id=tenant_id
-                )
-            
-            # Keep overlap for next chunk
-            current_buffer[:] = current_buffer[-overlap_size:]
-            
-            await websocket.send_json({
-                "type": "transcription_submitted",
-                "transcription_id": transcription_id,
-                "buffer_size": len(current_buffer),
-                "conversation_mode": conversation_mode
-            })
-    
-    except Exception as e:
-        await websocket.send_json({
-            "type": "error",
-            "message": f"Error processing audio chunk: {str(e)}"
-        })
-
+  print(data)
 async def handle_audio_stream_end(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str):
     """Handle end of audio stream"""
     conversation_mode = data.get("conversation_mode", False)

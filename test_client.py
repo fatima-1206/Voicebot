@@ -413,8 +413,10 @@ class VoicebotSTTClient:
 
         try:
             async for message in self.websocket:
+                data = json.loads(message)
+                # print(data)
                 try:
-                    data = json.loads(message)
+
                     message_type = data.get("type", "unknown") if isinstance(data, dict) else "unknown"
 
                     # --- NEW: Resolve futures for any message with chunk_id ---

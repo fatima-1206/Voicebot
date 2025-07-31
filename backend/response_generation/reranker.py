@@ -23,7 +23,7 @@ def load_reranker_model():
     
 
 
-def rerank_docs(query, docs, top_k=5):
+def rerank_docs(query, docs, top_k=2):
     
 
     # BGE-Reranker expects [query] </s> document format

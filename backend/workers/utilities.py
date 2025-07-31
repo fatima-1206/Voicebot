@@ -201,7 +201,7 @@ def safe_redis_publish(channel: str, message: dict, max_retries: int = 3) -> boo
         logger.error(f"❌ Failed to publish to Redis channel {channel}: {e}")
         return False
 
-def notify_audio_status(tenant_id: str, user_id: str, task_id: str, status: str, data: dict) -> bool:
+def notify_audio_status(tenant_id: str, user_id: str, task_id: str, number_of_scentences:int, status: str, data: dict) -> bool:
     """Notify audio status via WebSocket with improved error handling"""
     try:
         message = {
@@ -209,6 +209,7 @@ def notify_audio_status(tenant_id: str, user_id: str, task_id: str, status: str,
             "task_id": task_id,
             "status": status,
             "data": data,
+            "scentences": number_of_scentences,
             "timestamp": datetime.now().isoformat()
         }
         

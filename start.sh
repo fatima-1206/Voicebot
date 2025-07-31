@@ -152,6 +152,11 @@ check_prerequisites
 echo -e "${YELLOW}📦 Activating virtual environment...${NC}"
 source venv/bin/activate
 
+# download nltk 'punkt' tokenizer
+echo -e "${YELLOW}⬇️ Downloading NLTK 'punkt' tokenizer...${NC}"
+python -c "import nltk; nltk.download('punkt')"
+
+
 # Start Redis
 start_redis
 

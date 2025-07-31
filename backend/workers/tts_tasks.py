@@ -11,6 +11,7 @@ import subprocess
 from datetime import datetime
 from uuid import uuid4
 from gtts import gTTS
+from nltk.tokenize import sent_tokenize
 
 
 async def stream_audio_file(tenant_id: str, user_id: str, file_path: str, task_id: str):
@@ -209,69 +210,70 @@ def generate_tts_with_fallback(text: str, language: str, voice: str, output_path
     }
 
 
+
 def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id: str, 
                            language: str, voice: str, chunk_id: str=None) -> dict:
     """Generate TTS using Groq with gTTS fallback and stream via WebSocket"""
     
     try:
-        # Generate filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"tts_{timestamp}_{tts_task_id[:8]}.wav"
-        output_dir = "backend/rag/temp_audioFiles"
-        os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, filename)
-        
-        # Notify start
-        notify_audio_status(tenant_id, user_id, tts_task_id, "generating", 
-                          {"message": "Audio generation started"})
-        
-        print(f"🔄 [TTS] Generating audio with fallback: {text[:50]}...")
-        
-        # Generate audio with fallback
-        result = generate_tts_with_fallback(text, language, voice, output_path)
-        
-        if result["success"]:
-            print(f"✅ [TTS] Audio generated: {filename} using {result['provider']}")
+        # scentence tokenize the text response
+        print("\nGENERATING AND STREAMING TTS")
+        sentences = sent_tokenize(text)
+        for i, sentence in enumerate(sentences):
+            # Notify start for first sentence
+            if i == 0:
+                notify_audio_status(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    task_id=tts_task_id,
+                    number_of_scentences=len(sentences),
+                    status="generating",
+                    data={
+                        "message": "Audio generation started",
+                        "number_of_sentences": len(sentences)
+                    }
+                )
 
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"tts_{timestamp}_{tts_task_id[:8]}_{i}.wav"
+            output_dir = "backend/rag/temp_audioFiles"
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, filename)
             
-            # Notify ready
-            notify_audio_status(tenant_id, user_id, tts_task_id, "ready", {
-                "filename": filename,
-                "file_size": result["file_size"],
-                "audio_url": f"/tts/download/{filename}",
-                "voice": voice,
-                "language": language,
-                "provider": result["provider"],
-                "method": result["method"]
-            })
+            print(f"🔄 [TTS] Generating audio for sentence: {sentence[:50]}...")
             
-            # Stream audio file via WebSocket
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+            # Generate audio with fallback
+            result = generate_tts_with_fallback(sentence, language, voice, output_path)
+            
+            if result["success"]:
+                print(f"✅ [TTS] Audio generated: {filename} using {result['provider']}")
+
+                # Notify ready
+                # notify_audio_status(tenant_id, user_id, tts_task_id, "ready", {
+                #     "filename": filename,
+                #     "file_size": result["file_size"],
+                #     "audio_url": f"/tts/download/{filename}",
+                #     "voice": voice,
+                #     "language": language,
+                #     "provider": result["provider"],
+                #     "method": result["method"]
+                # })
+                
+                # Stream audio file via WebSocket
                 try:
-                    print("\n Audio streaming successful")
-                    loop.run_until_complete(stream_audio_file(tenant_id, user_id, output_path, tts_task_id))
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(stream_audio_file(tenant_id, user_id, output_path, f"{tts_task_id}_{i}"))
                 finally:
                     loop.close()
-            except Exception as stream_error:
-                print(f"⚠️ [TTS] Audio streaming failed: {stream_error}")
-                # Continue anyway, file is still available for download
-            
-            return {
-                "filename": filename,
-                "chunk_id": chunk_id,
-                "file_size": result["file_size"],
-                "status": "success",
-                "provider": result["provider"],
-                "method": result["method"]
-            }
-        else:
-            raise Exception(f"Both TTS providers failed: {result['provider']}")
-        
+
+        return {
+            "status": "success",
+            "message": f"Successfully generated and streamed {len(sentences)} sentence(s)."
+        }
     except Exception as e:
         print(f"❌ [TTS] Generation failed: {e}")
-        notify_audio_status(tenant_id, user_id, tts_task_id, "error", {
+        notify_audio_status(tenant_id=tenant_id, user_id=user_id, number_of_scentences=len(sentences),task_id= tts_task_id, status="error", data={
             "error": str(e),
             "provider": "TTS with fallback"
         })

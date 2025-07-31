@@ -13,7 +13,9 @@ from uuid import uuid4
 from gtts import gTTS
 from nltk.tokenize import sent_tokenize
 import edge_tts 
-
+from backend.db.models import Tenant, BillingPlan
+from backend.db.connection import SessionLocal
+from backend.auth.jwt_ import get_current_user
 async def stream_audio_file(tenant_id: str, user_id: str, file_path: str, task_id: str):
     """Stream audio file content via WebSocket in chunks"""
     if not redis_client:
@@ -156,27 +158,55 @@ async def generate_tts_with_ftts(text: str, language: str, output_path: str, voi
         return False, f"Edge TTS - {str(e)}"
     
 # ...existing code...
+def get_billing_plan_from_db(tenant_id: str) -> str:
+    """Get user's billing plan from the database"""
+    db = SessionLocal()
+    billing_plan = "Free"  # Default plan
 
-def generate_tts_with_fallback(text: str, language: str, voice: str, output_path: str) -> dict:
+    try:
+        tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+        if tenant and tenant.billing_plan_id:
+            billing_plan_id = tenant.billing_plan_id
+            if billing_plan_id:
+                billing_plan = db.query(BillingPlan).filter(BillingPlan.id == billing_plan_id).first()
+                if billing_plan:
+                    return billing_plan.name
+    except Exception as e:
+        print(f"❌ [DB] Error fetching billing plan: {e}")
+        return "Free"
+    finally:
+        db.close()
+    return billing_plan
+
+def generate_tts_with_fallback(tenant_id:str ,text: str, language: str, voice: str, output_path: str) -> dict:
     """Generate TTS with Groq as primary and Edge TTS as fallback"""
 
-    # Set default voice for Groq if not provided
-    if not voice:
-        voice = "Fritz-PlayAI"
 
-    success, provider = generate_tts_with_groq(text, voice, output_path)
+    # first get the user's billing plan. if they have a premium plan, use Groq, otherwise use Edge TTS
+    # query the database to get the tenant's billing plan
+   
+    billing_plan = get_billing_plan_from_db(tenant_id)
 
-    if success:
-        file_size = os.path.getsize(output_path)
-        return {
-            "success": True,
-            "provider": provider,
-            "file_size": file_size,
-            "method": "primary"
-        }
+    print(f"\nTHE USERS BILLING PLAN ISSSS {billing_plan}")
+    if billing_plan and billing_plan == "Pro":
+        # Set default voice for Groq if not provided
+        if not voice:
+            voice = "Fritz-PlayAI"
 
-    # Fallback to Edge TTS
-    print("⚠️ [TTS] Groq failed, falling back to Edge TTS...")
+        success, provider = generate_tts_with_groq(text, voice, output_path)
+
+        if success:
+            file_size = os.path.getsize(output_path)
+            return {
+                "success": True,
+                "provider": provider,
+                "file_size": file_size,
+                "method": "primary"
+            }
+
+        # Fallback to Edge TTS
+        print("⚠️ [TTS] Groq failed, falling back to Edge TTS...")
+    
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -233,7 +263,7 @@ def generate_and_stream_tts(text: str, tenant_id: str, user_id: str, tts_task_id
             print(f"🔄 [TTS] Generating audio for sentence: {sentence[:50]}...")
             
             # Generate audio with fallback
-            result = generate_tts_with_fallback(sentence, language, voice, output_path)
+            result = generate_tts_with_fallback(tenant_id, sentence, language, voice, output_path)
             
             if result["success"]:
                 print(f"✅ [TTS] Audio generated: {filename} using {result['provider']}")
@@ -275,8 +305,8 @@ def generate_tts_file(text: str, tts_task_id: str, language: str, voice: str, ch
         print(f"🔄 [TTS] Generating audio file with fallback: {text[:50]}...")
         
         # Generate audio with fallback
-        result = generate_tts_with_fallback(text, language, voice, output_path)
-        
+        result = generate_tts_with_fallback(tenant_id=tenant_id, text=text, language=language, voice=voice, output_path=output_path)
+
         if result["success"]:
             print(f"✅ [TTS] File generated: {filename} ({result['file_size']} bytes) using {result['provider']}")
             return {

@@ -16,6 +16,7 @@ from uuid import uuid4
 from silero_vad import get_speech_timestamps, collect_chunks
 from better_profanity import profanity
 from backend.workers.utilities import partial_censor
+import os
 
 
 profanity.load_censor_words()
@@ -170,6 +171,7 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
         # apply the profanity filter
         if full_transcript:
             full_transcript = partial_censor(full_transcript)
+            # write_to_file(full_transcript)
         confidence = getattr(info, 'language_probability', 0.0)
         detected_language = getattr(info, 'language', 'unknown')
         
@@ -303,6 +305,18 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
         }
 
 
+def write_to_file(transcription: str, file_path: str="/home/genesys/voicebot/Voicebot_fastapi/transcription.txt"):
+    """Write transcription to a text file"""
+    # create the file if it doesn't exist
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+    try:
+        with open(file_path, 'a', encoding='utf-8') as f:
+            f.write(transcription)
+        print(f"✅ Transcription written to {file_path}")
+    except Exception as e:
+        print(f"❌ Error writing transcription to file: {e}")
+
 @celery_app.task(name='process_continuous_audio', bind=True)
 def process_continuous_audio_task(self,speech_bytes, speech_timestamps, user_id: str, tenant_id: str, 
                                  buffer_key: str, tts_language: str = "en", 
@@ -365,6 +379,7 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
         transcript_parts = []
         for segment in segments:
             segment = partial_censor(segment.text.strip())
+            # write_to_file(segment)
             transcript_parts.append(segment.strip())
         
         transcript = " ".join(transcript_parts).strip()

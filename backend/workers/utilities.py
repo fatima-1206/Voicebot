@@ -34,27 +34,45 @@ def partial_censor(text):
     words = text.split()
     censored_words = []
     for word in words:
-        # Separate word from punctuation (including quotes) for accurate censoring
+        # Separate word from punctuation for accurate censoring
         import re
-        match = re.match(r"^([\"']?[a-zA-Z]+[\"']?)([.,!?<>\”\"\'?]*)$", word)
+        # Updated regex to handle alphanumeric characters and common word patterns
+        match = re.match(r"^([\"']?)([a-zA-Z0-9]+)([\"']?)([.,!?<>\"\"\'?\s]*)$", word)
         if match:
-            base_word = match.group(1)
-            punctuation = match.group(2)
-        else:
-            base_word = word
-            punctuation = ""
-        # Remove surrounding quotes for profanity check
-        clean = base_word.strip("\"'")
-        if profanity.contains_profanity(clean.lower()):
-            if len(clean) <= 2:
-                censored = '*' * len(clean)
+            leading_quote = match.group(1)
+            core_word = match.group(2)
+            trailing_quote = match.group(3)
+            punctuation = match.group(4)
+            
+            # Check if core word is profanity
+            if profanity.contains_profanity(core_word.lower()):
+                if len(core_word) <= 2:
+                    censored_core = '*' * len(core_word)
+                else:
+                    censored_core = core_word[0] + ('*' * (len(core_word) - 2)) + core_word[-1]
+                censored_words.append(leading_quote + censored_core + trailing_quote + punctuation)
             else:
-                censored = clean[0] + ('*' * (len(clean) - 2)) + clean[-1]
-            # Re-wrap censored word with original quotes
-            censored = base_word.replace(clean, censored)
-            censored_words.append(censored + punctuation)
+                censored_words.append(word)
         else:
-            censored_words.append(word)
+            # Fallback: try to extract alphabetic characters for profanity check
+            # Remove all non-alphabetic characters for profanity detection
+            clean_word = re.sub(r'[^a-zA-Z]', '', word)
+            if clean_word and profanity.contains_profanity(clean_word.lower()):
+                if len(clean_word) <= 2:
+                    censored_clean = '*' * len(clean_word)
+                else:
+                    censored_clean = clean_word[0] + ('*' * (len(clean_word) - 2)) + clean_word[-1]
+                # Replace the alphabetic part in the original word
+                censored_word = word
+                for i, char in enumerate(word):
+                    if char.isalpha():
+                        # Find position in clean_word and replace
+                        clean_pos = len(re.sub(r'[^a-zA-Z]', '', word[:i]))
+                        if clean_pos < len(censored_clean):
+                            censored_word = censored_word[:i] + censored_clean[clean_pos] + censored_word[i+1:]
+                censored_words.append(censored_word)
+            else:
+                censored_words.append(word)
     return ' '.join(censored_words)
 
 

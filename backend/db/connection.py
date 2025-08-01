@@ -12,7 +12,7 @@ print("DATABASE_URL =", repr(DATABASE_URL))
 engine = create_engine(
     DATABASE_URL,
     pool_size=20,          # Number of connections to maintain in pool
-    max_overflow=30,       # Additional connections beyond pool_size
+    max_overflow=0,       # Additional connections beyond pool_size
     pool_pre_ping=True,    # Validate connections before use
     pool_recycle=3600,     # Recycle connections every hour
     connect_args={

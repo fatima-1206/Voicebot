@@ -11,6 +11,7 @@ from backend.tts.routes import router as tts_router
 from backend.ws_manager import manager, connection_monitor, health_monitor
 import wave
 from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import Query
 import json
 import torch
 from backend.workers.stt_tasks import bytes_to_numpy_audio
@@ -31,6 +32,11 @@ from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
 from backend.audio_manager import AudioBufferManager
 from backend.redis_manager import redis_manager, redis_listener
+from backend.auth.utils import verify_websocket_token
+from backend.auth.jwt_ import get_current_user, UserTokenData
+import base64
+
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -151,6 +157,20 @@ def validate_websocket_message(data: dict) -> tuple[bool, str]:
 @app.websocket("/ws/{tenant_id}/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str):
     await websocket.accept()  # <-- Add this line
+# uncomment this for websocket authentication
+# @app.websocket("/ws/{tenant_id}/{user_id}")
+# async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str, token: str = Query(...)):
+#     # Add authentication
+#     try:
+#         user_data = verify_websocket_token(token)
+#         if user_data.tenant_id != tenant_id or user_data.user_id != user_id:
+#             await websocket.close(code=1008, reason="Unauthorized")
+#             return
+#     except Exception:
+#         await websocket.close(code=1008, reason="Invalid token")
+#         return
+    
+    
     session_id = str(uuid4())
     await websocket.send_json({"type": "session_id", "session_id": session_id})
 

@@ -313,9 +313,9 @@ def load_documents(include_postgres=True, include_mongo=True):
     """
     global all_documents, db_initialized
 
-    if db_initialized:
-        print("Database already initialized. Skipping document loading.")
-        return
+    # if db_initialized:
+    #     print("Database already initialized. Skipping document loading.")
+    #     return
 
     print("Loading documents from knowledge base...")
 

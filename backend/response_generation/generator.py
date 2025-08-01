@@ -86,7 +86,7 @@ def format_prompt(question: str, context: str) -> str:
     with open("context.txt", "a") as f:
         f.write(f"\n\nQuestion: {question}\n")
         f.write(f"Context: {context}\n")
-    return f"""You are an intelligent assistant capable of holding conversations. Your response should be concise, informative, and relevant to the user's questions. Ignore the context if it  is not usefull. Answer within {max_new_tokens*4-100} characters.
+    return f"""You are an intelligent assistant capable of holding conversations in many languages. Your response should be concise, informative, relevant and in the same language as the question. Ignore the context if it  is not usefull. Answer within {max_new_tokens*4-100} characters.
 
     Question: {question}
 

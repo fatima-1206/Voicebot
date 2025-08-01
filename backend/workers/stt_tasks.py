@@ -245,7 +245,7 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
         segments, info = model.transcribe(
             audio_data,
             beam_size=1,  # Faster decoding
-            language="en",
+            # language="en",
             condition_on_previous_text=False,  # More responsive
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=300)  # Quick silence detection
@@ -355,7 +355,7 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
         segments, info = model.transcribe(
             audio_data,
             beam_size=1,
-            language="en",
+            # language="en",
             condition_on_previous_text=False,
             vad_filter=True,  # We already did VAD
             initial_prompt=None

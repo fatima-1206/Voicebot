@@ -28,7 +28,7 @@ class VoicebotSTTClient:
         self.port = port
         self.pending_queries: Dict[str, asyncio.Future] = {}
 
-        self.token=None
+        self.token="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiZjAwY2UyNDgtNWEwNC00MWY1LTk3Y2EtODI4ZDI0ZWEyNjVhIiwidGVuYW50X2lkIjoiZDdhY2IwMTUtMWNlNi00NTFkLWIyNTMtZDc0NTUwNzBiNGI0IiwiaXNfYWRtaW4iOnRydWUsImJpbGxpbmdfcGxhbiI6IlBybyIsImV4cCI6MTc1NDYyOTU4NX0.zK9OOunBuM6KNOoc6MXx8AoN4ZMcPvG97c39XQG-lXI"
         self.tenant_id = tenant_id
         self.user_id = user_id
         self.websocket_url = f"ws://{host}:{port}/ws/{tenant_id}/{user_id}"

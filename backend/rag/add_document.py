@@ -7,42 +7,34 @@ When the vector database is constructed, all chunks in the postgres database wil
 from langchain_core.documents import Document as LC_Document
 from langchain.text_splitter import TokenTextSplitter
 from uuid import uuid4, UUID
-import mimetypes
 import os
+import tempfile
+import json
 from datetime import datetime
 from backend.db.models import Document as DB_Document, Chunk as DB_Chunk
-from sqlalchemy.orm import Session
 from langchain_community.document_loaders import (
     PyPDFLoader,
     UnstructuredWordDocumentLoader,
     UnstructuredEPubLoader,
     TextLoader
 )
-from langchain.retrievers import EnsembleRetriever
-from io import BytesIO
-import tempfile
-import json
 from celery import Celery
 import torch
 import gc
-
-# Import config for weights
-with open("config.json", "r") as f:
-    config = json.load(f)
+from pymongo import MongoClient
 
 splitter = TokenTextSplitter(chunk_size=256, chunk_overlap=64)
-
 celery_app = Celery('tasks', broker='redis://localhost:6379/0')
-db = None
 
 @celery_app.task(name='process_uploaded_document')
-def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public):
+def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public, upload_to_postgres=True, upload_to_mongo=False):
     """
     Process an uploaded document and add it to both the vector database and PostgreSQL.
     """
     from backend.db.connection import SessionLocal
     db = SessionLocal()  # Create session inside task
     temp_path = None
+    chunks_saved = 0  # Initialize to prevent undefined variable
 
     try:
         print(f"🔄 Task started for document: {filename} (doc_id: {doc_id})")
@@ -138,53 +130,55 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         else:
             print("⚠️ Warning: No chunks created from document, skipping FAISS update")
 
-        # Step 6: Update document metadata in PostgreSQL (don't create new, update existing)
-        print(f"💾 Updating document metadata in PostgreSQL...")
-        existing_doc = db.query(DB_Document).filter(DB_Document.id == doc_id).first()
-        if existing_doc:
-            existing_doc.path = temp_path
-            existing_doc.status = "processed"
-            print(f"✅ Updated existing document with ID: {existing_doc.id}")
-        else:
-            print(f"⚠️ Warning: Document with ID {doc_id} not found, creating new record")
-            db_doc = DB_Document(
-                id=doc_id,
-                filename=filename,
-                path=temp_path,
-                filetype=extension,
-                tenant_id=tenant_id,
-                user_id=user_id,
-                is_public=is_public,
-                size=len(file_bytes),
-                status="processed",
-                upload_time=datetime.utcnow()
-            )
-            db.add(db_doc)
-            existing_doc = db_doc
-
-        db.flush()
-
-        # Step 7: Store chunks in database
-        print(f"💾 Saving {len(chunks)} chunks to PostgreSQL...")
-        chunks_saved = 0
-        for chunk_id, chunk_text in chunk_data_for_db:
-            try:
-                db_chunk = DB_Chunk(
-                    id=chunk_id,  # Set chunk_id explicitly
-                    doc_id=existing_doc.id,
-                    text=chunk_text,
+        if upload_to_postgres:
+            # Step 6: Update document metadata in PostgreSQL (don't create new, update existing)
+            print(f"💾 Updating document metadata in PostgreSQL...")
+            existing_doc = db.query(DB_Document).filter(DB_Document.id == doc_id).first()
+            if existing_doc:
+                existing_doc.path = temp_path
+                existing_doc.status = "processed"
+                print(f"✅ Updated existing document with ID: {existing_doc.id}")
+            else:
+                print(f"⚠️ Warning: Document with ID {doc_id} not found, creating new record")
+                db_doc = DB_Document(
+                    id=doc_id,
+                    filename=filename,
+                    path=temp_path,
+                    filetype=extension,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    is_public=is_public,
+                    size=len(file_bytes),
+                    status="processed",
+                    upload_time=datetime.utcnow()
                 )
-                db.add(db_chunk)
-                chunks_saved += 1
-            except Exception as chunk_error:
-                print(f"❌ Error saving chunk {chunk_id}: {chunk_error}")
+                db.add(db_doc)
+                existing_doc = db_doc
 
+            db.flush()
 
-        # Commit all changes
-        print("💾 Committing changes to database...")
-        db.commit()
-        print(f"✅ Successfully saved {chunks_saved} chunks to PostgreSQL")
-        
+            # Step 7: Store chunks in database
+            print(f"💾 Saving {len(chunks)} chunks to PostgreSQL...")
+            for chunk_id, chunk_text in chunk_data_for_db:
+                try:
+                    db_chunk = DB_Chunk(
+                        id=chunk_id,  # Set chunk_id explicitly
+                        doc_id=existing_doc.id,
+                        text=chunk_text,
+                    )
+                    db.add(db_chunk)
+                    chunks_saved += 1
+                except Exception as chunk_error:
+                    print(f"❌ Error saving chunk {chunk_id}: {chunk_error}")
+
+            # Commit all changes
+            print("💾 Committing changes to database...")
+            db.commit()
+            print(f"✅ Successfully saved {chunks_saved} chunks to PostgreSQL")
+
+        if upload_to_mongo:
+            upload_chunks_to_mongo(doc_id, filename, extension, tenant_id, user_id, is_public, file_bytes, chunks, chunk_data_for_db, temp_path)
+
         return {
             "status": "success",
             "doc_id": str(doc_id),
@@ -195,12 +189,13 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
 
     except Exception as e:
         print(f"❌ Error processing document '{filename}': {str(e)}")
-        db.rollback()
+        if 'db' in locals():
+            db.rollback()
         raise e
     
     finally:
-
-        db.close()  # Always close the session
+        if 'db' in locals():
+            db.close()  # Always close the session
         # Clean up temp file and free memory
         if temp_path and os.path.exists(temp_path):
             try:
@@ -212,6 +207,86 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
+
+
+#  MONGO DB UPLOAD FUNCTION
+def upload_chunks_to_mongo(doc_id, filename, extension, tenant_id, user_id, is_public, file_bytes, chunks, chunk_data_for_db, temp_path):
+    """
+    Upload document chunks to MongoDB.
+    """
+    mongo_client = None
+    try:
+        print("💾 Saving chunks to MongoDB...")
+        
+        # Create MongoDB connection within function scope
+        mongo_client = MongoClient("mongodb://localhost:27017/")
+        mongo_db = mongo_client["voicebot_db"]
+        chunks_collection = mongo_db["chunks"]
+
+        upload_time = datetime.utcnow()
+
+        chunk_docs = []
+        for chunk_id, chunk_text in chunk_data_for_db:
+            doc = {
+                "chunk_id": str(chunk_id),
+                "text": chunk_text,
+                "doc_id": str(doc_id),
+                "filename": filename,
+                "filetype": extension,
+                "tenant_id": str(tenant_id),
+                "user_id": str(user_id),
+                "is_public": is_public,
+                "upload_time": upload_time,
+                "status": "processed",
+                "file_size": len(file_bytes),
+                "path": temp_path,
+                "language": "unknown"  # optional: set if you detect language elsewhere
+            }
+            chunk_docs.append(doc)
+
+        if chunk_docs:
+            result = chunks_collection.insert_many(chunk_docs)
+            print(f"✅ Inserted {len(result.inserted_ids)} chunks into MongoDB")
+            return {
+                "status": "success",
+                "doc_id": str(doc_id),
+                "chunks_created": len(chunks),
+                "chunks_saved": len(chunk_docs),
+                "message": f"Document '{filename}' processed successfully"
+            }
+        else:
+            print("⚠️ No chunks to insert")
+            return {
+                "status": "warning",
+                "doc_id": str(doc_id),
+                "chunks_created": 0,
+                "chunks_saved": 0,
+                "message": "No chunks created from document"
+            }
+
+    except Exception as e:
+        print(f"❌ Error inserting chunks into MongoDB: {e}")
+        raise e
+
+    finally:
+        # Close MongoDB connection
+        if mongo_client:
+            mongo_client.close()
+            
+        # Clean up temp file
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except Exception as e:
+                print(f"⚠️ Warning: Could not delete temp file {temp_path}: {e}")
+
+        # Clear GPU cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+
+
 
 
 

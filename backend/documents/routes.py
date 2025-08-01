@@ -23,7 +23,8 @@ async def upload_document(
     file: UploadFile = File(...),
     is_public: bool = False,  # Add optional parameter for public documents
     db: Session = Depends(get_db),
-    current_user: UserTokenData = Depends(get_current_user)
+    current_user: UserTokenData = Depends(get_current_user), 
+    use_mongo: bool = False
 ):
     # Validate file type
     # print stuff about the file:
@@ -70,7 +71,9 @@ async def upload_document(
         doc_id=str(doc_id),
         tenant_id=str(current_user.tenant_id),
         user_id=str(current_user.user_id),  # Add user_id
-        is_public=is_public  # Add is_public
+        is_public=is_public,  # Add is_public
+        use_mongo=use_mongo,
+        use_postgres=False if use_mongo else True  # Use Postgres if not using MongoDB
     )
 
     return {

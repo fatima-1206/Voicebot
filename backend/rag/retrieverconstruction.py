@@ -9,59 +9,65 @@ import gc
 import os
 import pickle
 import hashlib
+import json
+import csv
 from datetime import datetime
+from pathlib import Path
+from langchain_core.documents import Document
 from langchain_community.document_loaders import (
     PyPDFLoader,
     UnstructuredWordDocumentLoader,
     UnstructuredEPubLoader,
-    TextLoader
+    TextLoader,
+    WikipediaLoader
 )
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever
-import json
-from langchain_community.document_loaders import WikipediaLoader
-from datasets import load_dataset
-from langchain_core.documents import Document
-from backend.rag.scraper import crawl_website, save_to_json
 from langchain.text_splitter import TokenTextSplitter
-import csv
-# Add imports for database access
+from datasets import load_dataset
+from pymongo import MongoClient
+from backend.rag.scraper import crawl_website, save_to_json
 from backend.db.connection import SessionLocal
 from backend.db.models import Document as DB_Document, Chunk as DB_Chunk
-from sqlalchemy.orm import Session, joinedload
-
-import os
-from pathlib import Path
+from sqlalchemy.orm import Session
 
 # Get the absolute path to the project root
 PROJECT_ROOT = Path(__file__).parent.parent.parent  # Goes up 3 levels from this file
-#
-splitter = TokenTextSplitter(chunk_size=256, chunk_overlap=64)
 
+# Initialize paths
 csv_path = str(PROJECT_ROOT / "backend/rag/knowledge_base/links.csv")
 VECSTORE_PATH = str(PROJECT_ROOT / "backend/rag/vector_stores/faiss_index")
 config_path = str(PROJECT_ROOT / "config.json")
 cache_file = str(PROJECT_ROOT / "backend/rag/cache/cached_kb.pkl")
 RETRIEVER_STATE_FILE = str(PROJECT_ROOT / "backend/rag/cache/retriever_state.pkl")
-
-with open(config_path, "r") as f:
-    config = json.load(f)
-
 folder_path = str(PROJECT_ROOT / "backend/rag/knowledge_base")
-all_documents = []
 
-# Initialize embeddings as None - will be loaded only when needed
-embeddings = None
-embedding_model_name = "intfloat/multilingual-e5-base"
+# Initialize splitter
+splitter = TokenTextSplitter(chunk_size=256, chunk_overlap=64)
+
+# Load config safely
+config = {}
+try:
+    with open(config_path, "r") as f:
+        config = json.load(f)
+except FileNotFoundError:
+    print(f"⚠️ Config file not found at {config_path}, using defaults")
+    config = {"faissWeight": 0.7, "bm25Weight": 0.3}
+except Exception as e:
+    print(f"⚠️ Error loading config: {e}, using defaults")
+    config = {"faissWeight": 0.7, "bm25Weight": 0.3}
 
 # Global variables - these will be loaded from persistent storage
+all_documents = []
 db_initialized = False
 faiss_db = None
 hybrid_retriever = None
 faiss_retriever = None
 bm25_retriever = None
+embeddings = None
+embedding_model_name = "intfloat/multilingual-e5-base"
 
 # Keep track of visited URLs to avoid re-scraping
 visited_urls = set()
@@ -111,6 +117,9 @@ def load_documents_from_postgres(db: Session = None, tenant_id: str = None):
     Args:
         db: Database session (optional, will create new if not provided)
         tenant_id: Filter documents by tenant_id (optional, loads all if not provided)
+    
+    Returns:
+        tuple: (chunks_count, documents_count)
     """
     global all_documents
     
@@ -126,6 +135,8 @@ def load_documents_from_postgres(db: Session = None, tenant_id: str = None):
         
         # Query to get all processed documents, optionally filtered by tenant_id
         query = db.query(DB_Document).filter(DB_Document.status == 'processed')
+        if tenant_id:
+            query = query.filter(DB_Document.tenant_id == tenant_id)
      
         documents = query.all()
         
@@ -148,9 +159,8 @@ def load_documents_from_postgres(db: Session = None, tenant_id: str = None):
                     "upload_time": doc.upload_time.isoformat() if doc.upload_time else None,
                     "file_size": doc.size,
                     "chunk_id": str(chunk.id),
-                    "language": chunk.language
+                    "language": getattr(chunk, 'language', 'unknown')  # Safe attribute access
                 }
-                # print(metadata)
                 
                 # Create langchain Document and append to all_documents
                 lc_document = Document(
@@ -173,10 +183,76 @@ def load_documents_from_postgres(db: Session = None, tenant_id: str = None):
         if close_db:
             db.close()
 
-def load_scraped_documents(start_url:str, excluded_sublinks:str, depth=-1, json_path =str(PROJECT_ROOT / "backend/rag/scraped_docs.json")):
+def load_documents_from_mongo(tenant_id=None):
     """
-        Takes a url, crawls the website and saves all documents extracted from it to the json file
+    Load document chunks from MongoDB database and append them to all_documents.
+    
+    Args:
+        tenant_id: Filter documents by tenant_id (optional, loads all if not provided)
+    
+    Returns:
+        tuple: (chunks_count, documents_count)
     """
+    global all_documents
+    
+    mongo_client = None
+    try:
+        print("Loading documents from MongoDB...")
+        
+        # Create MongoDB connection within function scope
+        mongo_client = MongoClient("mongodb://localhost:27017/")
+        mongo_db = mongo_client["voicebot_db"]
+        chunks_collection = mongo_db["chunks"]
+
+        query = {"status": "processed"}
+        if tenant_id:
+            query["tenant_id"] = str(tenant_id)
+
+        mongo_docs = chunks_collection.find(query)
+
+        chunk_count = 0
+        doc_ids = set()
+
+        for chunk in mongo_docs:
+            metadata = {
+                "source": "user_uploaded",
+                "filename": chunk.get("filename"),
+                "filetype": chunk.get("filetype"),
+                "doc_id": chunk.get("doc_id"),
+                "tenant_id": chunk.get("tenant_id"),
+                "user_id": chunk.get("user_id"),
+                "is_public": chunk.get("is_public"),
+                "upload_time": chunk.get("upload_time").isoformat() if chunk.get("upload_time") else None,
+                "file_size": chunk.get("file_size"),
+                "chunk_id": chunk.get("chunk_id"),
+                "language": chunk.get("language", "unknown")
+            }
+
+            lc_document = Document(
+                page_content=chunk["text"],
+                metadata=metadata
+            )
+            all_documents.append(lc_document)
+            chunk_count += 1
+            doc_ids.add(chunk.get("doc_id"))
+
+        print(f"  -> Loaded {chunk_count} chunks from {len(doc_ids)} MongoDB documents")
+        return chunk_count, len(doc_ids)
+
+    except Exception as e:
+        print(f"  -> Error loading documents from MongoDB: {e}")
+        return 0, 0
+    
+    finally:
+        if mongo_client:
+            mongo_client.close()
+
+def load_scraped_documents(start_url: str, excluded_sublinks: str, depth=-1, json_path=str(PROJECT_ROOT / "backend/rag/scraped_docs.json")):
+    """
+    Takes a url, crawls the website and saves all documents extracted from it to the json file
+    """
+    global all_documents
+    
     scraped_docs = crawl_website(start_url, excluded_sublinks, depth)
     if scraped_docs:
         save_to_json(scraped_docs, json_path)
@@ -189,41 +265,52 @@ def load_scraped_documents(start_url:str, excluded_sublinks:str, depth=-1, json_
 
         print(f"  -> Crawled and chunked {len(scraped_docs)} scraped web documents")
 
-def scrape_links_from_csv(csv_path=csv_path, json_path = str(PROJECT_ROOT / "backend/rag/scraped_docs.json")):
+def scrape_links_from_csv(csv_path=csv_path, json_path=str(PROJECT_ROOT / "backend/rag/scraped_docs.json")):
     """
-    for all the links in the CSV file, scrape the website and save the documents
+    For all the links in the CSV file, scrape the website and save the documents
     """
     global all_documents
 
     if os.path.exists(json_path):
         print(f"Found cached scraped data at '{json_path}'. Skipping scraping...")
-        with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        for entry in data:
-            chunks = splitter.split_text(entry["content"])
-            all_documents.extend([
-                Document(page_content=chunk, metadata={"source": "url", "url": entry["url"]})
-                for chunk in chunks
-            ])
-
-            
-        print(f"  -> Loaded {len(data)} scraped web documents")
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            for entry in data:
+                chunks = splitter.split_text(entry["content"])
+                all_documents.extend([
+                    Document(page_content=chunk, metadata={"source": "url", "url": entry["url"]})
+                    for chunk in chunks
+                ])
+            print(f"  -> Loaded {len(data)} scraped web documents")
+        except Exception as e:
+            print(f"  -> Error loading cached scraped data: {e}")
         return
 
-    # if the json file does not exist, start crawling
+    # If the json file does not exist, start crawling
     print("Scraped data not found. Starting crawl...")
-    with open(csv_path, "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            start_url = row["url"]
-            if row["depth"]:
-                d = int(row["depth"])
+    if not os.path.exists(csv_path):
+        print(f"CSV file not found at {csv_path}, skipping web scraping")
+        return
+        
+    try:
+        with open(csv_path, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                start_url = row["url"]
+                depth = int(row["depth"]) if row.get("depth") else -1
+                load_scraped_documents(
+                    start_url=start_url, 
+                    excluded_sublinks=row.get("excluded_sublinks", ""), 
+                    depth=depth
+                )
+    except Exception as e:
+        print(f"  -> Error processing CSV file: {e}")
 
-                load_scraped_documents(start_url=start_url, excluded_sublinks=row["excluded_sublinks"], depth=d)
-            else:
-                load_scraped_documents(start_url=start_url, excluded_sublinks=row["excluded_sublinks"])
-
-def load_documents(include_postgres=True):
+def load_documents(include_postgres=True, include_mongo=True):
+    """
+    Load documents from various sources into the global all_documents list
+    """
     global all_documents, db_initialized
 
     if db_initialized:
@@ -238,120 +325,127 @@ def load_documents(include_postgres=True):
         # Still load PostgreSQL documents even if cache exists, as they might be new
         if include_postgres:
             load_documents_from_postgres()
+        if include_mongo:
+            load_documents_from_mongo()
         return
 
     # If cache is not available or invalid, load from files
     print("Cache not available or invalid. Loading documents from files...")
     all_documents = []
 
-    if not os.path.exists(folder_path):
-        print(f"Folder '{folder_path}' does not exist.")
-        return
-    if not os.listdir(folder_path):
-        print(f"Folder '{folder_path}' is empty.")
-        return
+    # Load local files
+    if os.path.exists(folder_path) and os.listdir(folder_path):
+        print("Loading local documents...")
+        for filename in os.listdir(folder_path):
+            filepath = os.path.join(folder_path, filename)
+            loader = None
+            
+            if filename.lower().endswith(".pdf"):
+                loader = PyPDFLoader(filepath)
+            elif filename.lower().endswith(".docx"):
+                loader = UnstructuredWordDocumentLoader(filepath)
+            elif filename.lower().endswith(".epub"):
+                loader = UnstructuredEPubLoader(filepath)
+            elif filename.lower().endswith(".txt"):
+                loader = TextLoader(filepath, encoding="utf-8")
+            else:
+                continue
 
-    print("Cache not available or invalid. Loading documents from files...")
-
-    for filename in os.listdir(folder_path):
-        filepath = os.path.join(folder_path, filename)
-        if filename.lower().endswith(".pdf"):
-            loader = PyPDFLoader(filepath)
-        elif filename.lower().endswith(".docx"):
-            loader = UnstructuredWordDocumentLoader(filepath)
-        elif filename.lower().endswith(".epub"):
-            loader = UnstructuredEPubLoader(filepath)
-        elif filename.lower().endswith(".txt"):
-            loader = TextLoader(filepath, encoding="utf-8")
-        else:
-            continue
-
-        try:
-            documents = loader.load()
-            n_chunks = len(documents)
-            for doc in documents:
-                chunks = splitter.split_text(doc.page_content)
-                all_documents.extend([
-                    Document(page_content=chunk, metadata=doc.metadata)
-                    for chunk in chunks
-                ])
-                n_chunks = len(chunks)
-            print(f"  -> Loaded {n_chunks} chunks from {filename}")
-        except Exception as e:
-            print(f"  -> Error loading {filename}: {e}")
+            try:
+                documents = loader.load()
+                for doc in documents:
+                    chunks = splitter.split_text(doc.page_content)
+                    all_documents.extend([
+                        Document(page_content=chunk, metadata={**doc.metadata, "source": "local_file"})
+                        for chunk in chunks
+                    ])
+                print(f"  -> Loaded {len(chunks)} chunks from {filename}")
+            except Exception as e:
+                print(f"  -> Error loading {filename}: {e}")
+    else:
+        print(f"Local folder '{folder_path}' does not exist or is empty.")
 
     print(f"Total local documents loaded: {len(all_documents)}")
     
+    # Load scraped documents
     scrape_links_from_csv()
-    print(f"Total local documents loaded after scraping: {len(all_documents)}")
+    print(f"Total documents after scraping: {len(all_documents)}")
 
     # Load documents from PostgreSQL
     if include_postgres:
         load_documents_from_postgres()
-        print(f"Total documents loaded after PostgreSQL: {len(all_documents)}")
+        print(f"Total documents after PostgreSQL: {len(all_documents)}")
+    if include_mongo:
+        load_documents_from_mongo()
+        print(f"Total documents after MongoDB: {len(all_documents)}")
 
-    # Wikipedia documents
+    # Load Wikipedia documents
     try:
-        wiki_loader = WikipediaLoader(query="FAST National University Pakistan", lang="en", load_max_docs=3)
-        wiki_docs = wiki_loader.load()
-        for doc in wiki_docs:
-            doc.metadata["source"] = "wikipedia"
-        all_documents.extend(wiki_docs)
-
-        wiki_loader = WikipediaLoader(query="Higher Education Commission (Pakistan)", lang="en", load_max_docs=3)
-        wiki_docs = wiki_loader.load()
-        for doc in wiki_docs:
-            doc.metadata["source"] = "wikipedia"
-        all_documents.extend(wiki_docs)
-
-        print(f"  -> Loaded {len(wiki_docs)} Wikipedia docs")
+        wiki_queries = [
+            "FAST National University Pakistan",
+            "Higher Education Commission (Pakistan)"
+        ]
+        
+        for query in wiki_queries:
+            wiki_loader = WikipediaLoader(query=query, lang="en", load_max_docs=3)
+            wiki_docs = wiki_loader.load()
+            for doc in wiki_docs:
+                doc.metadata["source"] = "wikipedia"
+            all_documents.extend(wiki_docs)
+        
+        print(f"  -> Loaded Wikipedia docs for {len(wiki_queries)} queries")
     except Exception as e:
         print(f"  -> Failed to load Wikipedia docs: {e}")
 
-    # Urdu QA dataset
+    # Load Urdu and English QA datasets
     try:
         dataset = load_dataset("tydiqa", "primary_task")
-        urdu_qas = [x for x in dataset["train"] if x["language"] == "ur"]
+        
+        # Urdu QA
+        urdu_qas = [x for x in dataset["train"] if x["language"] == "ur"][:1000]
         urdu_docs = [
-            Document(page_content=qa["context"], metadata={"question": qa["question"], "source": "tydiqa"})
-            for qa in urdu_qas[:1000]
+            Document(
+                page_content=qa["context"], 
+                metadata={"question": qa["question"], "source": "tydiqa", "language": "ur"}
+            )
+            for qa in urdu_qas
         ]
         all_documents.extend(urdu_docs)
         print(f"  -> Loaded {len(urdu_docs)} Urdu QA docs")
-    except Exception as e:
-        print(f"  -> Failed to load Urdu QA dataset: {e}")
-    
-    try:
-        dataset = load_dataset("tydiqa", "primary_task")
-        english_qas = [x for x in dataset["train"] if x["language"] == "en"]
+        
+        # English QA
+        english_qas = [x for x in dataset["train"] if x["language"] == "en"][:1000]
         english_docs = [
-            Document(page_content=qa["context"], metadata={"question": qa["question"], "source": "tydiqa"})
-            for qa in english_qas[:1000]
+            Document(
+                page_content=qa["context"], 
+                metadata={"question": qa["question"], "source": "tydiqa", "language": "en"}
+            )
+            for qa in english_qas
         ]
         all_documents.extend(english_docs)
         print(f"  -> Loaded {len(english_docs)} English QA docs")
+        
     except Exception as e:
-        print(f"  -> Failed to load English QA dataset: {e}")
+        print(f"  -> Failed to load QA datasets: {e}")
 
+    # Save to cache if we have documents
     if all_documents:
         save_documents_cache()
 
     db_initialized = True
     print(f"Total documents loaded (all sources): {len(all_documents)}")
 
-
 def load_vectorstore():
+    """Load FAISS vector store from disk if it exists"""
     if os.path.exists(os.path.join(VECSTORE_PATH, "index.faiss")):
         print("📂 Loading FAISS vector store from disk...")
-        embeddings = get_embeddings()  # Add this line
-        return FAISS.load_local(VECSTORE_PATH, embeddings, allow_dangerous_deserialization=True)
+        embeddings_model = get_embeddings()
+        return FAISS.load_local(VECSTORE_PATH, embeddings_model, allow_dangerous_deserialization=True)
     else:
-        print("🚫 FAISS index not found, constructing a new one...")
+        print("🚫 FAISS index not found, will construct a new one...")
         return None
 
-
-
-def construct_retrievers(include_postgres=True, tenant_id=None, user_id=None):
+def construct_retrievers(include_postgres=True, include_mongo=True, tenant_id=None, user_id=None):
     """
     Construct the retrievers for the loaded documents.
     This function initializes the FAISS and BM25 retrievers.
@@ -360,70 +454,87 @@ def construct_retrievers(include_postgres=True, tenant_id=None, user_id=None):
         include_postgres: Whether to include documents from PostgreSQL
         tenant_id: Filter PostgreSQL documents by tenant_id (optional)
         user_id: Filter PostgreSQL documents by user_id (optional)
+    
+    Returns:
+        tuple: (faiss_db, hybrid_retriever)
     """
     global db_initialized, faiss_db, hybrid_retriever, faiss_retriever, bm25_retriever
 
+    # Try to load existing FAISS store
     faiss_db = load_vectorstore()
-    # the folder hash must be checked to make sure the faiss index is still valid
+    
+    # Check if we have cached documents
     if faiss_db and load_documents_cache():
         print("FAISS vector store loaded from disk.")
         # Still load PostgreSQL documents even if cache exists
         if include_postgres:
-            load_documents_from_postgres()
+            load_documents_from_postgres(tenant_id=tenant_id)
+        if include_mongo:
+            load_documents_from_mongo()
     else:
         if db_initialized and faiss_db is not None and hybrid_retriever is not None:
             print("Retrievers already constructed. Skipping.")
-            return faiss_db, hybrid_retriever  # Fix: Use consistent return signature
+            return faiss_db, hybrid_retriever
 
+        # Load documents from all sources
         load_documents(include_postgres=include_postgres)
         
         if not all_documents:
             print("No documents loaded. Cannot construct retrievers.")
-            return None, None  # Fix: Use consistent return signature (2 values)
+            return None, None
 
-        # Step 2: Create FAISS vector store
+        # Create FAISS vector store
         print("Creating FAISS vector store...")
-        embeddings = get_embeddings()
-        faiss_db = FAISS.from_documents(all_documents, embeddings)
+        embeddings_model = get_embeddings()
+        faiss_db = FAISS.from_documents(all_documents, embeddings_model)
         print("FAISS vector store created successfully.")
 
+    # Ensure we have documents for BM25
     if not all_documents:
-        load_documents(include_postgres=include_postgres, )
+        load_documents(include_postgres=include_postgres)
         if not all_documents:
             print("No documents loaded. Cannot construct retrievers.")
-            return None, None  # Fix: Use consistent return signature
+            return None, None
 
-    # Step 2.1: Create FAISS retriever
+    # Create FAISS retriever
     print("Creating FAISS retriever...")
     faiss_retriever = faiss_db.as_retriever(search_type="similarity", search_kwargs={"k": 5})
     print("FAISS retriever created successfully.")
 
-    # Step 3: Create BM25 retriever
+    # Create BM25 retriever
     print("Creating BM25 retriever...")
     bm25_retriever = BM25Retriever.from_documents(all_documents)
     bm25_retriever.k = 5
     print("BM25 retriever created successfully.")
     
+    # Create hybrid retriever
     print("Creating hybrid retriever (EnsembleRetriever)...")
     hybrid_retriever = EnsembleRetriever(
         retrievers=[faiss_retriever, bm25_retriever],
-        weights=[config["faissWeight"], config["bm25Weight"]]
+        weights=[config.get("faissWeight", 0.7), config.get("bm25Weight", 0.3)]
     )
     print("Hybrid retriever created successfully.")
 
+    # Save vector store
     save_vectorstore(faiss_db)
 
     db_initialized = True
     print("Retrievers constructed successfully.")
+    
+    # Clean up memory
     unload_documents_and_embeddings(clear_faiss=False)
     
-    return faiss_db, hybrid_retriever  # Fix: Consistent return signature
+    return faiss_db, hybrid_retriever
 
 def save_vectorstore(faiss_db):
-    if not os.path.exists(VECSTORE_PATH):
-        os.makedirs(VECSTORE_PATH)
-    faiss_db.save_local(VECSTORE_PATH)
-    print(f"🔐 FAISS vector store saved to {VECSTORE_PATH}")
+    """Save FAISS vector store to disk"""
+    try:
+        if not os.path.exists(VECSTORE_PATH):
+            os.makedirs(VECSTORE_PATH)
+        faiss_db.save_local(VECSTORE_PATH)
+        print(f"🔐 FAISS vector store saved to {VECSTORE_PATH}")
+    except Exception as e:
+        print(f"❌ Error saving vector store: {e}")
 
 def get_folder_hash():
     """Get hash of all files in knowledge base to detect changes"""
@@ -442,7 +553,6 @@ def get_folder_hash():
     
     return hashlib.md5("_".join(file_info).encode()).hexdigest()
 
-
 def save_documents_cache():
     """Save processed documents to cache"""
     cache_data = {
@@ -453,16 +563,15 @@ def save_documents_cache():
     }
   
     try:
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
         with open(cache_file, 'wb') as f:
             pickle.dump(cache_data, f)
-        print(f"Saved {len(all_documents)} documents to cache")
+        print(f"💾 Saved {len(all_documents)} documents to cache")
     except Exception as e:
-        print(f"Failed to save cache: {e}")
-
+        print(f"❌ Failed to save cache: {e}")
 
 def load_documents_cache():
     """Load documents from cache if valid"""
-  
     if not os.path.exists(cache_file):
         print("No cache file found")
         return False
@@ -481,14 +590,12 @@ def load_documents_cache():
         
         global all_documents
         all_documents = cache_data["documents"]
-        print(f"Loaded {len(all_documents)} documents from cache (saved on {cache_data.get('timestamp', 'unknown')})")
+        print(f"📁 Loaded {len(all_documents)} documents from cache (saved on {cache_data.get('timestamp', 'unknown')})")
         return True
         
     except Exception as e:
-        print(f"Failed to load cache: {e}")
+        print(f"❌ Failed to load cache: {e}")
         return False
-
-
 
 def unload_documents_and_embeddings(clear_faiss=False):
     """Unload documents and embeddings after retrievers are created."""
@@ -496,18 +603,20 @@ def unload_documents_and_embeddings(clear_faiss=False):
 
     all_documents = []
 
+    # Keep embeddings loaded for future use
     # if embeddings:
     #     del embeddings
     #     embeddings = None
 
+    # Keep FAISS DB unless explicitly requested to clear
     # if clear_faiss and faiss_db:
     #     del faiss_db
     #     faiss_db = None
 
     gc.collect()
-    torch.cuda.empty_cache()
-    print("Documents and embeddings unloaded and GPU cache cleared.")
-
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    print("🧹 Documents unloaded and GPU cache cleared.")
 
 def get_retrievers():
     """Get the constructed retrievers. Constructs them if not already done."""
@@ -540,7 +649,7 @@ def get_retrievers():
                     if bm25_retriever is not None:
                         hybrid_retriever = EnsembleRetriever(
                             retrievers=[faiss_retriever, bm25_retriever],
-                            weights=[config["faissWeight"], config["bm25Weight"]]
+                            weights=[config.get("faissWeight", 0.7), config.get("bm25Weight", 0.3)]
                         )
                         print("✅ Hybrid retriever created from existing components")
                     else:
@@ -591,6 +700,12 @@ def update_faiss_and_hybrid_retriever(faiss_db):
     """
     Update the hybrid retriever with a new FAISS store while keeping existing BM25.
     This is efficient because we don't recreate BM25.
+    
+    Args:
+        faiss_db: Updated FAISS vector store
+        
+    Returns:
+        tuple: (faiss_retriever, hybrid_retriever)
     """
     global hybrid_retriever, faiss_retriever
     
@@ -603,7 +718,7 @@ def update_faiss_and_hybrid_retriever(faiss_db):
         if bm25_retriever is not None:
             hybrid_retriever = EnsembleRetriever(
                 retrievers=[faiss_retriever, bm25_retriever],
-                weights=[config["faissWeight"], config["bm25Weight"]]
+                weights=[config.get("faissWeight", 0.7), config.get("bm25Weight", 0.3)]
             )
             print("✅ Hybrid retriever updated (new FAISS + existing BM25)")
         else:
@@ -615,3 +730,6 @@ def update_faiss_and_hybrid_retriever(faiss_db):
     except Exception as e:
         print(f"❌ Error updating retrievers: {e}")
         return None, None
+
+
+

@@ -226,9 +226,7 @@ def scrape_links_from_csv(csv_path=csv_path, json_path = str(PROJECT_ROOT / "bac
 def load_documents(include_postgres=True):
     global all_documents, db_initialized
 
-    if db_initialized:
-        print("Database already initialized. Skipping document loading.")
-        return
+   
 
     print("Loading documents from knowledge base...")
 

@@ -10,7 +10,7 @@ import json
 from backend.db.connection import SessionLocal
 from backend.auth.jwt_ import get_current_user, UserTokenData
 from backend.rag.mongo_connector import MongoDBConnector
-from backend.workers.tasks import process_mongodb_documents
+from backend.rag.add_document import process_loaded_chunks  # Import the existing task
 from .schemas import (
     MongoConnectionRequest, 
     MongoConnectionResponse, 
@@ -104,7 +104,7 @@ async def load_mongodb_documents(
         redis_client.setex(
             f"mongo_job:{job_id}", 
             3600,  # 1 hour TTL
-            json.dumps(job_info)  # Use JSON instead of str()
+            json.dumps(job_info)
         )
         
         # Add background task
@@ -223,16 +223,37 @@ async def process_mongodb_documents_sync(
                     )
                     all_docs.extend(docs)
                     collections_processed.append(collection)
-            # TODO
-            # Here you would typically add documents to your vector store
-            # from backend.rag.add_document import add_documents_to_vectorstore
-            # await add_documents_to_vectorstore(all_docs, current_user.tenant_id)
+            
+            # Add tenant_id and user_id to document metadata for proper isolation
+            for doc in all_docs:
+                doc.metadata.update({
+                    "tenant_id": str(current_user.tenant_id),
+                    "user_id": str(current_user.user_id),
+                    "source_type": "mongodb",
+                    "loaded_at": datetime.now().isoformat()
+                })
+            
+            # Use the existing process_loaded_chunks task to add to vector store
+            if all_docs:
+                logger.info(f"Sending {len(all_docs)} MongoDB documents to vector store processing")
+                
+                # Convert LangChain documents to serializable format for Celery
+                serializable_docs = []
+                for doc in all_docs:
+                    serializable_docs.append({
+                        "page_content": doc.page_content,
+                        "metadata": doc.metadata
+                    })
+                
+                # Queue the task asynchronously
+                task_result = process_loaded_chunks.delay(serializable_docs)
+                logger.info(f"Vector store processing task queued with ID: {task_result.id}")
             
             processing_time = (datetime.now() - start_time).total_seconds()
             
             return DocumentLoadResponse(
                 success=True,
-                message=f"Successfully processed {len(all_docs)} documents",
+                message=f"Successfully processed {len(all_docs)} documents and queued for vector store",
                 documents_loaded=len(all_docs),
                 collections_processed=collections_processed,
                 processing_time=processing_time
@@ -277,16 +298,24 @@ async def process_mongodb_documents_task(
     
     try:
         # Update job status
-        update_job_status("processing", 0.0, "Starting document processing...")
+        update_job_status("processing", 10.0, "Loading documents from MongoDB...")
         
         # Process documents
         result = await process_mongodb_documents_sync(selection_request, current_user)
         
-        # Update completion status
+        # Update progress - documents loaded, now processing for vector store
+        update_job_status(
+            "processing", 
+            75.0, 
+            f"Documents loaded, processing {result.documents_loaded} documents for vector store..."
+        )
+        
+        # The actual vector store processing is now handled by the Celery task
+        # We'll mark this as completed since the main job (loading from MongoDB) is done
         update_job_status(
             "completed", 
             100.0, 
-            f"Successfully processed {result.documents_loaded} documents", 
+            f"Successfully loaded {result.documents_loaded} documents from MongoDB and queued for vector store processing", 
             result.documents_loaded, 
             result.documents_loaded
         )

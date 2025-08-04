@@ -35,6 +35,59 @@ splitter = TokenTextSplitter(chunk_size=256, chunk_overlap=64)
 celery_app = Celery('tasks', broker='redis://localhost:6379/0')
 db = None
 
+@celery_app.task(name='process_loaded_chunks')
+def process_loaded_chunks(chunks):
+    """ 
+    Given an array of chunks, embed and add them to the vector database.
+    Chunks can be either LangChain Document objects or serialized dictionaries.
+    """
+    print(f"Processing {len(chunks)} chunks...")
+    
+    # Convert serialized chunks back to LangChain Document objects if needed
+    langchain_chunks = []
+    for chunk in chunks:
+        if isinstance(chunk, dict):
+            # Convert dictionary back to LangChain Document
+            langchain_chunks.append(LC_Document(
+                page_content=chunk.get("page_content", ""),
+                metadata=chunk.get("metadata", {})
+            ))
+        elif isinstance(chunk, LC_Document):
+            # Already a LangChain Document
+            langchain_chunks.append(chunk)
+        else:
+            print(f"⚠️ Warning: Unknown chunk type: {type(chunk)}")
+            continue
+    
+    print(f"📝 Converted {len(langchain_chunks)} chunks to LangChain Document format")
+    
+    # Add your processing logic here
+    from backend.rag import retrieverconstruction
+    # Get or initialize retrievers (this will use caching now)
+    faiss_db, hybrid_retriever = retrieverconstruction.get_retrievers()
+
+    if len(langchain_chunks) > 0:
+        print(f"📝 Adding {len(langchain_chunks)} chunks to FAISS vector store...")
+        faiss_db.add_documents(langchain_chunks)
+        retrieverconstruction.save_vectorstore(faiss_db)
+        print("✅ Chunks added to FAISS successfully")
+
+        # Step 5: Update retrievers (new FAISS + existing BM25)
+        faiss_retriever, hybrid_retriever = retrieverconstruction.update_faiss_and_hybrid_retriever(faiss_db)
+
+        if faiss_retriever is not None and hybrid_retriever is not None:
+            retrieverconstruction.faiss_db = faiss_db
+            retrieverconstruction.hybrid_retriever = hybrid_retriever
+            retrieverconstruction.faiss_retriever = faiss_retriever
+            print("✅ Retrievers updated efficiently")
+        else:
+            print("❌ Failed to update retrievers")
+    else:
+        print("⚠️ Warning: No valid chunks to process, skipping FAISS update")
+
+    # Step 
+    return {"status": "success", "processed_chunks": len(langchain_chunks)}
+
 @celery_app.task(name='process_uploaded_document')
 def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public):
     """

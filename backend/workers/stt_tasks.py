@@ -305,7 +305,7 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
 
 @celery_app.task(name='process_continuous_audio', bind=True)
 def process_continuous_audio_task(self,speech_bytes, speech_timestamps, user_id: str, tenant_id: str, 
-                                 buffer_key: str, tts_language: str = "en", 
+                                 buffer_key: str, device_id: str, tts_language: str = "en", 
                                  voice: str = "Fritz-PlayAI",chunk_id=None, auto_respond: bool = True, use_rag: bool = True):
     """
     Process continuous audio stream with server-side VAD
@@ -325,7 +325,7 @@ def process_continuous_audio_task(self,speech_bytes, speech_timestamps, user_id:
             chunk_id = f"{user_id}_{int(time.time() * 1000)}"
             
         segment_result = process_speech_segment(
-            speech_bytes, user_id, chunk_id, tenant_id,
+            speech_bytes, user_id, chunk_id, tenant_id, device_id,
             tts_language, voice, auto_respond, use_rag=use_rag
         )
         
@@ -343,7 +343,7 @@ def process_continuous_audio_task(self,speech_bytes, speech_timestamps, user_id:
 
 
 def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str, 
-                         tenant_id: str, tts_language: str, voice: str, auto_respond: bool, use_rag: bool = True):
+                         tenant_id: str, device_id: str, tts_language: str, voice: str, auto_respond: bool, use_rag: bool = True):
     """
     Process a single detected speech segment through STT+RAG+TTS
     """

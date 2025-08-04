@@ -8,6 +8,7 @@ from collections import defaultdict
 from fastapi import WebSocket, WebSocketDisconnect
 import threading  # Add this import
 from fastapi.websockets import WebSocketState
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -86,13 +87,15 @@ class RateLimiter:
                 del self.message_times[key]
 
 class ConnectionManager:
-    """Enhanced WebSocket connection manager with improved error handling, monitoring, and resource management"""
+    """Enhanced WebSocket connection manager with multi-device support"""
     
-    def __init__(self, max_connections_per_user: int = 3, message_rate_limit: int = 100):
-        self.active_connections: Dict[str, WebSocket] = {}  # maps tenant_id:user_id → WebSocket
+    def __init__(self, max_connections_per_user: int = 10, max_devices_per_user: int = 5, message_rate_limit: int = 100):
+        # Change to support multiple devices per user
+        self.active_connections: Dict[str, WebSocket] = {}  # maps tenant_id:user_id:device_id → WebSocket
         self.connection_metadata: Dict[str, Dict[str, Any]] = {}  # Store connection metadata
-        self.user_connections: Dict[str, Set[str]] = defaultdict(set)  # user_id → set of connection keys
+        self.user_connections: Dict[str, Dict[str, str]] = defaultdict(dict)  # user_id → {device_id: connection_key}
         self.max_connections_per_user = max_connections_per_user
+        self.max_devices_per_user = max_devices_per_user
         
         # Monitoring and metrics
         self.metrics = ConnectionMetrics()
@@ -106,20 +109,21 @@ class ConnectionManager:
         self._sync_lock = threading.Lock()
         self._async_lock = asyncio.Lock()
         
-    async def connect(self, tenant_id: str, user_id: str, websocket: WebSocket) -> bool:
-        """Connect a WebSocket with improved validation and limits"""
-        key = f"{tenant_id}:{user_id}"
+    async def connect(self, tenant_id: str, user_id: str, websocket: WebSocket, device_id: str = None) -> bool:
+        """Connect a WebSocket with multi-device support"""
+        if not device_id:
+            device_id = str(uuid4())
+            
+        key = f"{tenant_id}:{user_id}:{device_id}"
 
         async with self._async_lock:
-            # Check connection limits per user
-            if len(self.user_connections[user_id]) >= self.max_connections_per_user:
-                logger.warning(f"❌ Connection limit exceeded for user {user_id}")
-                await websocket.close(code=1008, reason="Connection limit exceeded")
+            # Check device limits per user
+            if len(self.user_connections[user_id]) >= self.max_devices_per_user:
+                logger.warning(f"❌ Device limit exceeded for user {user_id}")
+                await websocket.close(code=1008, reason="Device limit exceeded")
                 return False
 
             try:
-                # await websocket.accept()  # <-- REMOVE THIS LINE
-
                 # Store connection and metadata
                 self.active_connections[key] = websocket
                 self.connection_metadata[key] = {
@@ -127,9 +131,10 @@ class ConnectionManager:
                     "last_activity": time.time(),
                     "message_count": 0,
                     "tenant_id": tenant_id,
-                    "user_id": user_id
+                    "user_id": user_id,
+                    "device_id": device_id
                 }
-                self.user_connections[user_id].add(key)
+                self.user_connections[user_id][device_id] = key
 
                 # Update metrics
                 self.metrics.record_connection()
@@ -141,10 +146,17 @@ class ConnectionManager:
                 logger.error(f"❌ Error accepting WebSocket connection {key}: {e}")
                 return False
 
-    def disconnect(self, tenant_id: str, user_id: str) -> bool:
-        """Disconnect with proper cleanup"""
-        key = f"{tenant_id}:{user_id}"
-        
+    def disconnect(self, tenant_id: str, user_id: str, device_id: str = None) -> bool:
+        """Disconnect with proper cleanup for specific device"""
+        if device_id:
+            key = f"{tenant_id}:{user_id}:{device_id}"
+            return self._disconnect_single_device(key, user_id, device_id)
+        else:
+            # Disconnect all devices for user (backward compatibility)
+            return self._disconnect_all_user_devices(tenant_id, user_id)
+    
+    def _disconnect_single_device(self, key: str, user_id: str, device_id: str) -> bool:
+        """Disconnect a single device"""
         with self._sync_lock:
             if key in self.active_connections:
                 try:
@@ -154,8 +166,8 @@ class ConnectionManager:
                         del self.connection_metadata[key]
                     
                     # Remove from user connections
-                    if user_id in self.user_connections:
-                        self.user_connections[user_id].discard(key)
+                    if user_id in self.user_connections and device_id in self.user_connections[user_id]:
+                        del self.user_connections[user_id][device_id]
                         if not self.user_connections[user_id]:
                             del self.user_connections[user_id]
                     
@@ -170,11 +182,55 @@ class ConnectionManager:
                     return False
             
             return False
+    
+    def _disconnect_all_user_devices(self, tenant_id: str, user_id: str) -> bool:
+        """Disconnect all devices for a user"""
+        success = True
+        if user_id in self.user_connections:
+            device_keys = list(self.user_connections[user_id].keys())
+            for device_id in device_keys:
+                key = f"{tenant_id}:{user_id}:{device_id}"
+                if not self._disconnect_single_device(key, user_id, device_id):
+                    success = False
+        return success
 
-    async def send_to_user(self, tenant_id: str, user_id: str, message: str) -> bool:
-        """Send text message with improved error handling and rate limiting"""
-        key = f"{tenant_id}:{user_id}"
-        
+    async def send_to_user_device(self, tenant_id: str, user_id: str, message: str, device_id: str = None) -> bool:
+        """Send message to specific device or all user devices"""
+        if device_id:
+            key = f"{tenant_id}:{user_id}:{device_id}"
+            return await self._send_to_connection(key, message)
+        else:
+            # Send to all user devices
+            return await self.send_to_all_user_devices(tenant_id, user_id, message)
+    
+    async def send_to_all_user_devices(self, tenant_id: str, user_id: str, message: str) -> Dict[str, bool]:
+        """Send message to all devices of a user"""
+        results = {}
+        if user_id in self.user_connections:
+            for device_id, connection_key in self.user_connections[user_id].items():
+                results[device_id] = await self._send_to_connection(connection_key, message)
+        return results
+
+    async def send_json_to_user_device(self, tenant_id: str, user_id: str, data: dict, device_id: str = None) -> bool:
+        """Send JSON to specific device or all user devices"""
+        if device_id:
+            key = f"{tenant_id}:{user_id}:{device_id}"
+            return await self._send_json_to_connection(key, data)
+        else:
+            # Send to all user devices
+            return await self.send_json_to_all_user_devices(tenant_id, user_id, data)
+    
+    async def send_json_to_all_user_devices(self, tenant_id: str, user_id: str, data: dict) -> Dict[str, bool]:
+        """Send JSON to all devices of a user"""
+        results = {}
+        if user_id in self.user_connections:
+            for device_id, connection_key in self.user_connections[user_id].items():
+                results[device_id] = await self._send_json_to_connection(connection_key, data)
+        return results
+
+    # Helper methods for sending to connections
+    async def _send_to_connection(self, key: str, message: str) -> bool:
+        """Send text message to a specific connection"""
         # Check rate limit
         if not self.rate_limiter.is_allowed(key):
             logger.warning(f"⚠️ Rate limit exceeded for {key}")
@@ -204,10 +260,8 @@ class ConnectionManager:
                 self._cleanup_connection(key)
             return False
 
-    async def send_json_to_user(self, tenant_id: str, user_id: str, data: dict) -> bool:
-        """Send JSON data with improved error handling and rate limiting"""
-        key = f"{tenant_id}:{user_id}"
-        
+    async def _send_json_to_connection(self, key: str, data: dict) -> bool:
+        """Send JSON data to a specific connection"""
         # Check rate limit
         if not self.rate_limiter.is_allowed(key):
             logger.warning(f"⚠️ Rate limit exceeded for {key}")
@@ -247,32 +301,23 @@ class ConnectionManager:
                 self._cleanup_connection(key)
             return False
 
-    async def broadcast_to_tenant(self, tenant_id: str, data: dict, exclude_user: Optional[str] = None) -> int:
-        """Broadcast message to all users in a tenant"""
-        sent_count = 0
-        
-        # Get all connections for this tenant
-        tenant_connections = []
-        with self._sync_lock:
-            for key in self.active_connections.keys():
-                if key.startswith(f"{tenant_id}:"):
-                    _, user_id = key.split(":", 1)
-                    if exclude_user and user_id == exclude_user:
-                        continue
-                    tenant_connections.append((key, user_id))
-        
-        # Send to all connections
-        for key, user_id in tenant_connections:
-            if await self.send_json_to_user(tenant_id, user_id, data):
-                sent_count += 1
-        
-        return sent_count
+    def get_user_devices(self, user_id: str) -> List[str]:
+        """Get list of device IDs for a user"""
+        return list(self.user_connections.get(user_id, {}).keys())
+    
+    def get_user_device_count(self, user_id: str) -> int:
+        """Get number of connected devices for a user"""
+        return len(self.user_connections.get(user_id, {}))
 
-    def is_connected(self, tenant_id: str, user_id: str) -> bool:
-        """Check if a user is connected with thread safety"""
-        key = f"{tenant_id}:{user_id}"
-        with self._sync_lock:
-            return key in self.active_connections
+    def is_connected(self, tenant_id: str, user_id: str, device_id: str = None) -> bool:
+        """Check if a user or specific device is connected"""
+        if device_id:
+            key = f"{tenant_id}:{user_id}:{device_id}"
+            with self._sync_lock:
+                return key in self.active_connections
+        else:
+            # Check if user has any connected devices
+            return self.get_user_device_count(user_id) > 0
 
     async def _is_websocket_alive(self, websocket: WebSocket) -> bool:
         """Enhanced WebSocket health check"""

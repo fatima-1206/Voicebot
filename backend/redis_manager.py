@@ -1,4 +1,3 @@
-
 import redis
 import logging
 from typing import Dict, Any
@@ -141,6 +140,35 @@ class RedisManager:
         except Exception as e:
             logger.error(f"❌ Failed to revoke tasks for {session_key}: {e}")
 
+    def publish_to_user_device(self, tenant_id: str, user_id: str, message: dict, device_id: str = None):
+        """Send message to specific device or all user devices"""
+        message['tenant_id'] = tenant_id
+        message['user_id'] = user_id
+        if device_id:
+            message['device_id'] = device_id
+            channel = f"voicebot_responses_{tenant_id}_{user_id}_{device_id}"
+        else:
+            channel = f"voicebot_responses_{tenant_id}_{user_id}"
+        
+        self.publish(channel, json.dumps(message))
+    
+    def revoke_device_tasks(self, session_id: str, device_id: str):
+        """Revoke tasks for a specific device"""
+        try:
+            # Get all active tasks for this session/device
+            active_tasks = celery_app.control.inspect().active()
+            
+            for worker, tasks in active_tasks.items():
+                for task in tasks:
+                    # Check if task belongs to this session and device
+                    if (task.get('kwargs', {}).get('session_id') == session_id and 
+                        task.get('kwargs', {}).get('device_id') == device_id):
+                        celery_app.control.revoke(task['id'], terminate=True)
+                        logger.info(f"🚫 Revoked task {task['id']} for device {device_id}")
+                        
+        except Exception as e:
+            logger.error(f"❌ Error revoking device tasks: {e}")
+
 
 
 
@@ -219,14 +247,20 @@ class RedisListener:
             if len(parts) >= 3:
                 tenant_id = parts[1]
                 user_id = parts[2]
+                device_id = parts[3] if len(parts) > 3 else None
                 
-                # Check if user is still connected before processing
-                if manager.is_connected(tenant_id, user_id):
+                # Check if user has any connected devices before processing
+                if manager.get_user_device_count(user_id) > 0:
                     # Parse message data
                     data = json.loads(message['data'])
                     
-                    # Forward to WebSocket client
-                    success = await manager.send_json_to_user(tenant_id, user_id, data)
+                    # Forward to WebSocket client - send to all user devices
+                    if device_id:
+                        success = await manager.send_json_to_user_device(tenant_id, user_id, data, device_id)
+                    else:
+                        results = await manager.send_json_to_all_user_devices(tenant_id, user_id, data)
+                        success = any(results.values()) if results else False
+                    
                     if success:
                         self.message_count += 1
                         self.last_message_time = time.time()

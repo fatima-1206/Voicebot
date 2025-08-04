@@ -155,26 +155,32 @@ def validate_websocket_message(data: dict) -> tuple[bool, str]:
         return False, f"Validation error: {str(e)}"
 
 @app.websocket("/ws/{tenant_id}/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str):
-    await websocket.accept()  # <-- Add this line
-# uncomment this for websocket authentication
-# @app.websocket("/ws/{tenant_id}/{user_id}")
-# async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str, token: str = Query(...)):
-#     # Add authentication
-#     try:
-#         user_data = verify_websocket_token(token)
-#         if user_data.tenant_id != tenant_id or user_data.user_id != user_id:
-#             await websocket.close(code=1008, reason="Unauthorized")
-#             return
-#     except Exception:
-#         await websocket.close(code=1008, reason="Invalid token")
-#         return
+async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str, device_id: Optional[str] = Query(None)):
+    # First, authenticate the token before accepting the connection
+    # try:
+    #     user_data = verify_websocket_token(token)
+    #     if user_data.get("tenant_id") != tenant_id or user_data.get("user_id") != user_id:
+    #         await websocket.close(code=1008, reason="Unauthorized")
+    #         return
+    # except Exception:
+    #     await websocket.close(code=1008, reason="Invalid token")
+    #     return
     
+    # Accept the WebSocket connection FIRST
+    await websocket.accept()
+    
+    # Now we can send messages
+    if not device_id:
+        device_id = str(uuid4())
     
     session_id = str(uuid4())
-    await websocket.send_json({"type": "session_id", "session_id": session_id})
-
-    if not await manager.connect(tenant_id, user_id, websocket):
+    await websocket.send_json({
+        "type": "session_info", 
+        "session_id": session_id,
+        "device_id": device_id
+    })
+    
+    if not await manager.connect(tenant_id, user_id, websocket, device_id):
         return
 
     try:
@@ -213,47 +219,51 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str)
         manager.disconnect(tenant_id, user_id)
 
 
-async def process_websocket_message(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, session_id: str):
-    """Process individual WebSocket messages with improved error handling"""
+async def process_websocket_message(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, session_id: str, device_id: str = None):
+    """Process individual WebSocket messages with device support"""
     if "type" in data:
         message_type = data.get("type")
     else:
         message_type = "unknown"
         print(f"❓ Unknown message type received: {data}")
-    key = f"{tenant_id}_{user_id}"
+    
+    # Use device-specific key for audio buffers
+    key = f"{tenant_id}_{user_id}_{device_id}" if device_id else f"{tenant_id}_{user_id}"
 
     if message_type == "ping":
-        await websocket.send_json({"type": "pong", "timestamp": time.time()})
+        await websocket.send_json({"type": "pong", "timestamp": time.time(), "device_id": device_id})
 
     elif message_type == "continuous_audio_stream":
-        await handle_continuous_audio_stream(websocket, tenant_id, user_id, data, key, session_id)
+        await handle_continuous_audio_stream(websocket, tenant_id, user_id, data, key, session_id, device_id)
 
     elif message_type == "start_continuous_conversation":
-        await handle_start_continuous_conversation(websocket, tenant_id, user_id, key, session_id)
+        await handle_start_continuous_conversation(websocket, tenant_id, user_id, key, session_id, device_id)
 
     elif message_type == "stop_continuous_conversation":
-        await handle_stop_continuous_conversation(websocket, tenant_id, user_id, key, session_id)
+        await handle_stop_continuous_conversation(websocket, tenant_id, user_id, key, session_id, device_id)
 
     elif message_type == "query":
-        await handle_query(websocket, tenant_id, user_id, data, session_id)
+        await handle_query(websocket, tenant_id, user_id, data, session_id, device_id)
 
     elif message_type == "query_with_tts":
-        await handle_query_with_tts(websocket, tenant_id, user_id, data, session_id)
+        await handle_query_with_tts(websocket, tenant_id, user_id, data, session_id, device_id)
 
     elif message_type == "audio_stream":
-        await handle_audio_stream(websocket, tenant_id, user_id, data, key, session_id)
+        await handle_audio_stream(websocket, tenant_id, user_id, data, key, session_id, device_id)
 
     elif message_type == "audio_stream_end":
-        await handle_audio_stream_end(websocket, tenant_id, user_id, data, key, session_id)
+        await handle_audio_stream_end(websocket, tenant_id, user_id, data, key, session_id, device_id)
 
     else:
         await websocket.send_json({
             "type": "error",
-            "message": f"Unknown message type: {message_type}"
+            "message": f"Unknown message type: {message_type}",
+            "device_id": device_id
         })
 
-async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str):
-    """Handle continuous audio stream with improved buffer management"""
+# Update all handler functions to include device_id parameter
+async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
+    """Handle continuous audio stream with device-specific buffer management"""
     audio_chunk_base64 = data.get("audio")
     if not audio_chunk_base64:
         return
@@ -304,11 +314,12 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
                 speech_timestamps=speech_timestamps,
                 user_id=user_id,
                 tenant_id=tenant_id,
+                device_id=device_id,  # Make sure this is included
                 buffer_key=key,
                 tts_language=data.get("tts_language", "en"),
                 voice=data.get("voice", "Fritz-PlayAI"),
                 auto_respond=data.get("auto_respond", True),
-                chunk_id= data.get("chunk_id", str(uuid4())),
+                chunk_id=data.get("chunk_id", str(uuid4())),
                 use_rag=data.get("rag", True) # Enable RAG processing if not specified
             )
     
@@ -318,7 +329,7 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
             "message": f"Error processing continuous audio: {str(e)}"
         })
 
-async def handle_start_continuous_conversation(websocket: WebSocket, tenant_id: str, user_id: str, key: str, session_id: str):
+async def handle_start_continuous_conversation(websocket: WebSocket, tenant_id: str, user_id: str, key: str, session_id: str, device_id: str = None):
     """Initialize continuous conversation mode"""
     audio_buffer_manager.clear_buffer(key)
     await websocket.send_json({
@@ -326,7 +337,7 @@ async def handle_start_continuous_conversation(websocket: WebSocket, tenant_id: 
         "message": "Ready for continuous conversation"
     })
 
-async def handle_stop_continuous_conversation(websocket: WebSocket, tenant_id: str, user_id: str, key: str, session_id: str):
+async def handle_stop_continuous_conversation(websocket: WebSocket, tenant_id: str, user_id: str, key: str, session_id: str, device_id: str = None):
     """Stop continuous conversation mode"""
     audio_buffer_manager.clear_buffer(key)
     await websocket.send_json({
@@ -334,7 +345,7 @@ async def handle_stop_continuous_conversation(websocket: WebSocket, tenant_id: s
         "message": "Continuous conversation stopped"
     })
 
-async def handle_query(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, session_id: str):
+async def handle_query(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, session_id: str, device_id: str = None):
     """Handle regular query submission"""
     from backend.workers.tasks import process_query_task
     
@@ -365,7 +376,7 @@ async def handle_query(websocket: WebSocket, tenant_id: str, user_id: str, data:
         "message": "Query received and being processed..."
     })
 
-async def handle_query_with_tts(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, session_id: str):
+async def handle_query_with_tts(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, session_id: str, device_id: str = None):
     """Handle query with TTS"""
     from backend.workers.tasks import process_query_with_tts_task
     
@@ -402,9 +413,9 @@ async def handle_query_with_tts(websocket: WebSocket, tenant_id: str, user_id: s
         "message": "Query with TTS received and being processed..."
     })
 
-async def handle_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str):
+async def handle_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
   print(data)
-async def handle_audio_stream_end(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str):
+async def handle_audio_stream_end(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
     """Handle end of audio stream"""
     conversation_mode = data.get("conversation_mode", False)
     

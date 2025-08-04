@@ -203,7 +203,7 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str,
                 continue
 
             try:
-                await process_websocket_message(websocket, tenant_id, user_id, data, session_id)
+                await process_websocket_message(websocket, tenant_id, user_id, data, session_id, device_id)
             except Exception as e:
                 logger.error(f"❌ Error processing WebSocket message: {e}\n{data}")
                 await websocket.send_json({
@@ -263,70 +263,67 @@ async def process_websocket_message(websocket: WebSocket, tenant_id: str, user_i
 
 # Update all handler functions to include device_id parameter
 async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
-    """Handle continuous audio stream with device-specific buffer management"""
+    """Handle continuous audio stream with enhanced backend buffering"""
     audio_chunk_base64 = data.get("audio")
     if not audio_chunk_base64:
         return
     
     try:
+        # Decode the small audio chunk (100ms)
         audio_bytes = base64.b64decode(audio_chunk_base64)
-        audio_buffer_manager.append_audio(key, audio_bytes)
         
-        # Only process if we have enough audio data
-        current_buffer = audio_buffer_manager.get_buffer(key)
-        min_process_size = 16000  # 1 second at 16kHz
+        # Let buffer manager handle VAD and speech detection
+        result = audio_buffer_manager.append_audio(key, audio_bytes)
         
-        if len(current_buffer) >= min_process_size:
-            # Get buffer contents and clear it
-            buffer_data = audio_buffer_manager.get_and_clear_buffer(key)
+        # Process any detected speech segments
+        if result.get("status") == "speech_detected":
+            segments = result.get("segments", [])
             
-
-            
-            # Submit to Celery for processing only if there is speech detected
-            # Apply VAD to detect speech segments
-            from backend.workers.stt_tasks import get_speech_timestamps
-            audio_data = bytes_to_numpy_audio(audio_bytes)
-            if audio_data is None or len(audio_data) == 0:
-                return {"status": "no_audio"}
-            
-            # Convert to tensor for VAD
-            audio_tensor = torch.from_numpy(audio_data).float()
-            audio_tensor = torch.clamp(audio_tensor, -1.0, 1.0)
-            
-            speech_timestamps = get_speech_timestamps(
-                audio_tensor, 
-                vad_model, 
-                sampling_rate=sample_rate,
-                threshold=0.2,
-                min_speech_duration_ms=200,  # Minimum 0.5s speech
-                min_silence_duration_ms=100,  # 0.3s silence to separate utterances
-                speech_pad_ms=50  # Add padding around speech
-            )
-        #    convert tensor back to bytes
-            audio_bytes = audio_tensor.numpy().astype(np.float32).tobytes()
-
-            int16_audio = np.clip(audio_tensor.numpy(), -1.0, 1.0)
-            int16_audio = (int16_audio * 32767).astype(np.int16)
-            audio_bytes = int16_audio.tobytes()
-            from backend.workers.stt_tasks import process_continuous_audio_task
-            process_continuous_audio_task.delay(
-                speech_bytes=audio_bytes,
-                speech_timestamps=speech_timestamps,
-                user_id=user_id,
-                tenant_id=tenant_id,
-                device_id=device_id,  # Make sure this is included
-                buffer_key=key,
-                tts_language=data.get("tts_language", "en"),
-                voice=data.get("voice", "Fritz-PlayAI"),
-                auto_respond=data.get("auto_respond", True),
-                chunk_id=data.get("chunk_id", str(uuid4())),
-                use_rag=data.get("rag", True) # Enable RAG processing if not specified
-            )
+            for segment_bytes in segments:
+                # Process each speech segment
+                await _process_speech_segment(
+                    websocket=websocket,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    data=data,
+                    speech_bytes=segment_bytes,
+                    device_id=device_id
+                )
     
     except Exception as e:
         await websocket.send_json({
             "type": "error",
             "message": f"Error processing continuous audio: {str(e)}"
+        })
+
+async def _process_speech_segment(websocket: WebSocket, tenant_id: str, user_id: str, 
+                                 data: dict, speech_bytes: bytes, device_id: str = None):
+    """Process a detected speech segment"""
+    try:
+        # Generate unique chunk ID for this speech segment
+        chunk_id = f"{user_id}_{int(time.time() * 1000)}"
+        
+        # Submit to Celery for STT + RAG + TTS processing using the correct task
+        from backend.workers.pipeline_management import transcribe_and_respond_task
+        transcribe_and_respond_task.delay(
+            audio_bytes=speech_bytes,
+            user_id=user_id,
+            chunk_id=chunk_id,
+            tenant_id=tenant_id,
+            conversation_mode=True,
+            tts_language=data.get("tts_language", "en"),
+            voice=data.get("voice", "Fritz-PlayAI"),
+            auto_respond=data.get("auto_respond", True),
+            use_rag=data.get("rag", True)
+        )
+        
+        logger.info(f"🔄 Speech segment submitted for processing: {chunk_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing speech segment: {e}")
+        await websocket.send_json({
+            "type": "error",
+            "message": f"Error processing speech segment: {str(e)}"
         })
 
 async def handle_start_continuous_conversation(websocket: WebSocket, tenant_id: str, user_id: str, key: str, session_id: str, device_id: str = None):
@@ -414,7 +411,22 @@ async def handle_query_with_tts(websocket: WebSocket, tenant_id: str, user_id: s
     })
 
 async def handle_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
-  print(data)
+    """Handle regular audio stream"""
+    audio_chunk_base64 = data.get("audio")
+    if not audio_chunk_base64:
+        return
+    
+    try:
+        audio_bytes = base64.b64decode(audio_chunk_base64)
+        audio_buffer_manager.append_audio(key, audio_bytes)
+        
+    except Exception as e:
+        logger.error(f"❌ Error handling audio stream: {e}")
+        await websocket.send_json({
+            "type": "error",
+            "message": f"Error processing audio stream: {str(e)}"
+        })
+
 async def handle_audio_stream_end(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
     """Handle end of audio stream"""
     conversation_mode = data.get("conversation_mode", False)
@@ -458,6 +470,8 @@ async def handle_audio_stream_end(websocket: WebSocket, tenant_id: str, user_id:
                 "message": f"Error processing final audio chunk: {str(e)}"
             })
 
+@app.get("/ping")
+async def ping_connections():
     """Ping all active WebSocket connections"""
     results = await manager.ping_all_connections()
     return {

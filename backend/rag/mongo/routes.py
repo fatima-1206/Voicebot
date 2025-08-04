@@ -10,7 +10,7 @@ import json
 from backend.db.connection import SessionLocal
 from backend.auth.jwt_ import get_current_user, UserTokenData
 from backend.rag.mongo_connector import MongoDBConnector
-from backend.rag.add_document import process_loaded_chunks  # Import the existing task
+from backend.rag.add_document import process_loaded_chunks, process_uploaded_document  # Import the existing task
 from .schemas import (
     MongoConnectionRequest, 
     MongoConnectionResponse, 
@@ -246,7 +246,8 @@ async def process_mongodb_documents_sync(
                     })
                 
                 # Queue the task asynchronously
-                task_result = process_loaded_chunks.delay(serializable_docs)
+                task_result = process_uploaded_document.delay(
+                    file_bytes=None, filename=None, doc_id=None, tenant_id=None, user_id=None, is_public=False, chunks_given=True, chunks=serializable_docs)
                 logger.info(f"Vector store processing task queued with ID: {task_result.id}")
             
             processing_time = (datetime.now() - start_time).total_seconds()

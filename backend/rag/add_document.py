@@ -94,7 +94,7 @@ def process_loaded_chunks(chunks):
     return {"status": "success", "processed_chunks": len(langchain_chunks)}
 
 @celery_app.task(name='process_uploaded_document')
-def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public):
+def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public, chunks_given=False, chunks=None):
     """
     Process an uploaded document and add it to both the vector database and PostgreSQL.
     """
@@ -103,83 +103,108 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
     temp_path = None
 
     try:
-        print(f"🔄 Task started for document: {filename} (doc_id: {doc_id})")
-
+        chunk_ids=None
         # Import and get fresh references to retrievers
         from backend.rag import retrieverconstruction
 
         # Get or initialize retrievers (this will use caching now)
         faiss_db, hybrid_retriever = retrieverconstruction.get_retrievers()
 
+
         if faiss_db is None:
             print("❌ Failed to initialize FAISS vector store")
             raise ValueError("Failed to initialize FAISS vector store")
 
+
         print(f"✅ Retrieved FAISS DB: {faiss_db is not None}")
         print(f"✅ Retrieved Hybrid Retriever: {hybrid_retriever is not None}")
+        if not (chunks_given and chunks):
 
-        # Convert string UUIDs to UUID objects
-        doc_id = UUID(doc_id) if isinstance(doc_id, str) else doc_id
-        tenant_id = UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
-        user_id = UUID(user_id) if isinstance(user_id, str) else user_id
+            print(f"🔄 Task started for document: {filename} (doc_id: {doc_id})")
 
-        # Step 1: Save to temp file
-        extension = os.path.splitext(filename)[-1].lower()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
-            temp_file.write(file_bytes)
-            temp_path = temp_file.name
 
-        # Step 2: Pick loader
-        if extension == ".pdf":
-            loader = PyPDFLoader(temp_path)
-        elif extension == ".docx":
-            loader = UnstructuredWordDocumentLoader(temp_path)
-        elif extension == ".epub":
-            loader = UnstructuredEPubLoader(temp_path)
-        elif extension == ".txt":
-            loader = TextLoader(temp_path, encoding="utf-8")
-        else:
-            print(f"⚠️ Unsupported file extension: {extension}")
-            raise ValueError(f"Unsupported file extension: {extension}")
+            # Convert string UUIDs to UUID objects
+            doc_id = UUID(doc_id) if isinstance(doc_id, str) else doc_id
+            tenant_id = UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
+            user_id = UUID(user_id) if isinstance(user_id, str) else user_id
 
-        # Step 3: Load and split document
-        loaded_docs = loader.load()
-        chunks = []
-        chunk_ids = []
-        chunk_data_for_db = []
+            # Step 1: Save to temp file
+            extension = os.path.splitext(filename)[-1].lower()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
+                temp_file.write(file_bytes)
+                temp_path = temp_file.name
 
-        for doc in loaded_docs:
-            for chunk_text in splitter.split_text(doc.page_content):
-                chunk_id = str(uuid4())
-                chunk_ids.append(chunk_id)
+            # Step 2: Pick loader
+            if extension == ".pdf":
+                loader = PyPDFLoader(temp_path)
+            elif extension == ".docx":
+                loader = UnstructuredWordDocumentLoader(temp_path)
+            elif extension == ".epub":
+                loader = UnstructuredEPubLoader(temp_path)
+            elif extension == ".txt":
+                loader = TextLoader(temp_path, encoding="utf-8")
+            else:
+                print(f"⚠️ Unsupported file extension: {extension}")
+                raise ValueError(f"Unsupported file extension: {extension}")
 
-                # Add chunk to FAISS list
-                chunks.append(
-                    LC_Document(
-                        page_content=chunk_text,
-                        metadata={
-                            "chunk_id": chunk_id,
-                            "filename": filename,
-                            "tenant_id": str(tenant_id),
-                            "user_id": str(user_id),
-                            "doc_id": str(doc_id),
-                            "filetype": extension,
-                            "size": len(file_bytes),
-                            "is_public": is_public,
-                            **doc.metadata
-                        }
+            # Step 3: Load and split document
+            loaded_docs = loader.load()
+            chunks = []
+            chunk_ids = []
+            chunk_data_for_db = []
+
+            for doc in loaded_docs:
+                for chunk_text in splitter.split_text(doc.page_content):
+                    chunk_id = str(uuid4())
+                    chunk_ids.append(chunk_id)
+
+                    # Add chunk to FAISS list
+                    chunks.append(
+                        LC_Document(
+                            page_content=chunk_text,
+                            metadata={
+                                "chunk_id": chunk_id,
+                                "filename": filename,
+                                "tenant_id": str(tenant_id),
+                                "user_id": str(user_id),
+                                "doc_id": str(doc_id),
+                                "filetype": extension,
+                                "size": len(file_bytes),
+                                "is_public": is_public,
+                                **doc.metadata
+                            }
+                        )
                     )
-                )
 
-                # Store tuple for PostgreSQL insertion
-                chunk_data_for_db.append((chunk_id, chunk_text))
+                    # Store tuple for PostgreSQL insertion
+                    chunk_data_for_db.append((chunk_id, chunk_text))
 
-        print(f"📝 Created {len(chunks)} chunks from document")
+            print(f"📝 Created {len(chunks)} chunks from document")
 
         # Step 4: Add to FAISS vectorstore and update retrievers
         if len(chunks) > 0:
+            langchain_chunks = []
+            for chunk in chunks:
+                if isinstance(chunk, dict):
+                    # Convert dictionary back to LangChain Document
+                    langchain_chunks.append(LC_Document(
+                        page_content=chunk.get("page_content", ""),
+                        metadata=chunk.get("metadata", {})
+                    ))
+                elif isinstance(chunk, LC_Document):
+                    # Already a LangChain Document
+                    langchain_chunks.append(chunk)
+                else:
+                    print(f"⚠️ Warning: Unknown chunk type: {type(chunk)}")
+                    continue
+            
+            print(f"📝 Converted {len(langchain_chunks)} chunks to LangChain Document format")
+            chunks = langchain_chunks  # Update chunks to be LangChain Documents        
             print(f"📝 Adding {len(chunks)} chunks to FAISS vector store...")
-            faiss_db.add_documents(chunks, ids=chunk_ids)
+            if chunk_ids:
+                faiss_db.add_documents(chunks, ids=chunk_ids)
+            else:
+                faiss_db.add_documents(chunks)
             retrieverconstruction.save_vectorstore(faiss_db)
             print("✅ Chunks added to FAISS successfully")
 
@@ -196,6 +221,12 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         else:
             print("⚠️ Warning: No chunks created from document, skipping FAISS update")
 
+        if chunks_given and chunks:
+            db.commit()
+            return {
+                "status": "success",
+                "chunks_saved": len(chunks)
+            }
         # Step 6: Update document metadata in PostgreSQL (don't create new, update existing)
         print(f"💾 Updating document metadata in PostgreSQL...")
         existing_doc = db.query(DB_Document).filter(DB_Document.id == doc_id).first()

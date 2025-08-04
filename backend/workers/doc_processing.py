@@ -6,7 +6,7 @@ from backend.workers.utilities import get_db_session
 
 
 @celery_app.task(name='process_uploaded_document')
-def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public):
+def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public, chunks_given=False, chunks=None):
     """Process uploaded document - extract text, create chunks, etc."""
     print(f"🔄 [DOC] Processing: {filename}")
     
@@ -29,7 +29,9 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
                 doc_id=doc_id,
                 tenant_id=tenant_id,
                 user_id=user_id,
-                is_public=is_public
+                is_public=is_public,
+                chunks_given=chunks_given,  
+                chunks=chunks
             )
             
             return result

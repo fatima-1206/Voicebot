@@ -76,16 +76,21 @@ def process_loaded_chunks(chunks):
         faiss_retriever, hybrid_retriever = retrieverconstruction.update_faiss_and_hybrid_retriever(faiss_db)
 
         if faiss_retriever is not None and hybrid_retriever is not None:
+            # CRITICAL: Update the global module variables like process_uploaded_document does
             retrieverconstruction.faiss_db = faiss_db
             retrieverconstruction.hybrid_retriever = hybrid_retriever
             retrieverconstruction.faiss_retriever = faiss_retriever
-            print("✅ Retrievers updated efficiently")
+            print("✅ Retrievers updated efficiently and global state updated")
         else:
             print("❌ Failed to update retrievers")
     else:
         print("⚠️ Warning: No valid chunks to process, skipping FAISS update")
 
-    # Step 
+    # Clear GPU cache to free memory (like in process_uploaded_document)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
     return {"status": "success", "processed_chunks": len(langchain_chunks)}
 
 @celery_app.task(name='process_uploaded_document')

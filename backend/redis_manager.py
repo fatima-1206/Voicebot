@@ -1,4 +1,3 @@
-
 import redis
 import logging
 from typing import Dict, Any
@@ -257,3 +256,7 @@ class RedisListener:
 redis_manager = RedisManager()
 # Initialize Redis listener
 redis_listener = RedisListener(redis_manager)
+
+def get_redis_client():
+    """Get the Redis client instance."""
+    return redis_manager.client

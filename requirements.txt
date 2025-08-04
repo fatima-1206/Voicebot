@@ -65,3 +65,4 @@ tiktoken
 groq
 better-profanity
 gtts
+rich

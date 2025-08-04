@@ -8,6 +8,7 @@ from backend.auth.routes import router as auth_router
 from backend.documents.routes import router as documents_router
 from backend.query_processsing.routes import router as query_router
 from backend.tts.routes import router as tts_router
+from backend.rag.mongo.routes import router as mongo_router
 from backend.ws_manager import manager, connection_monitor, health_monitor
 import wave
 from fastapi import WebSocket, WebSocketDisconnect
@@ -54,6 +55,7 @@ app.include_router(auth_router, prefix="/auth")
 app.include_router(documents_router, prefix="/documents")
 app.include_router(query_router, prefix="/query")
 app.include_router(tts_router, prefix="/tts")
+app.include_router(mongo_router, prefix="/rag/mongo")
 
 # Initialize improved buffer manager
 audio_buffer_manager = AudioBufferManager()

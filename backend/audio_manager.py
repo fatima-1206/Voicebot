@@ -69,14 +69,24 @@ class AudioBufferManager:
             current_buffer.extend(audio_bytes)
             self.user_last_activity[key] = time.time()
             
-            # Process buffer for speech segments
-            return self._process_buffer_for_speech(key)
-    
+            # Only process if we have minimum required data
+            min_processing_threshold = 8000  # 0.5 seconds at 16kHz (16000 samples/sec * 2 bytes/sample * 0.5 sec)
+            
+            if len(current_buffer) >= min_processing_threshold:
+                # Process buffer for speech segments
+                return self._process_buffer_for_speech(key)
+            else:
+                return {
+                    "status": "accumulating",
+                    "buffer_size": len(current_buffer),
+                    "threshold": min_processing_threshold
+                }
+
     def _process_buffer_for_speech(self, key: str) -> Dict[str, Any]:
         """Process buffer for speech detection and segmentation"""
         try:
             current_buffer = self.user_audio_buffers[key]
-            if len(current_buffer) < 3200:  # Less than 200ms at 16kHz
+            if len(current_buffer) < 8000:  # Less than 0.5s at 16kHz
                 return {"status": "insufficient_data"}
             
             # Convert buffer to numpy array for VAD
@@ -92,9 +102,8 @@ class AudioBufferManager:
                 completed_segments = self._update_speech_state(key, speech_segments, audio_data)
                 
                 if completed_segments:
-                    # Clear processed audio from buffer
-                    # Keep last 1 second for continuity
-                    keep_samples = 16000  # 1 second at 16kHz
+                    # Clear processed audio from buffer - keep last 0.5 seconds for continuity
+                    keep_samples = 8000  # 0.5 second at 16kHz
                     keep_bytes = keep_samples * 2  # 2 bytes per sample (int16)
                     if len(current_buffer) > keep_bytes:
                         current_buffer[:] = current_buffer[-keep_bytes:]
@@ -105,6 +114,13 @@ class AudioBufferManager:
                         "segment_count": len(completed_segments)
                     }
             
+            # Check if buffer is getting too large without speech
+            max_no_speech_buffer = 32000  # 2 seconds
+            if len(current_buffer) > max_no_speech_buffer:
+                # Clear old non-speech data
+                current_buffer[:] = current_buffer[-16000:]  # Keep last 1 second
+                logger.debug(f"🔇 Cleared non-speech audio buffer for {key}")
+        
             return {"status": "processing"}
             
         except Exception as e:

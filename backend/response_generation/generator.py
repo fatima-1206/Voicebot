@@ -52,16 +52,13 @@ def initialize_rag_chain():
         return  # Already initialized
     
     try:
-        from backend.rag.retrieverconstruction import get_retrievers, construct_retrievers
+        from backend.rag.retriever_manager import get_retrievers_with_auto_reload
         
-        # Get retrievers (they should be initialized by Celery worker)
-        faiss_db, hybrid_retriever = get_retrievers()
-        
-        if hybrid_retriever is None:
-            print("⚠️ Retrievers not found, constructing new ones...")
-            faiss_db, hybrid_retriever = construct_retrievers()
+        # Get retrievers with automatic reload check
+        faiss_db, hybrid_retriever = get_retrievers_with_auto_reload()
         
         if hybrid_retriever is None:
+            print("⚠️ Retrievers not found after reload check")
             raise ValueError("Failed to initialize retrievers")
         
         # Initialize model if not already done
@@ -81,6 +78,40 @@ def initialize_rag_chain():
         print(f"❌ Failed to initialize RAG chain: {e}")
         raise
 
+def refresh_rag_chain():
+    """Force refresh of RAG chain with updated retrievers"""
+    global rag_chain
+    
+    try:
+        from backend.rag.retriever_manager import get_retrievers_with_auto_reload
+        
+        print("🔄 Refreshing RAG chain with updated retrievers...")
+        
+        # Get fresh retrievers with auto-reload
+        faiss_db, hybrid_retriever = get_retrievers_with_auto_reload()
+        
+        if hybrid_retriever is None:
+            print("❌ Failed to get updated retrievers")
+            return False
+        
+        # Initialize model if not already done
+        initialize_model()
+        
+        # Rebuild RAG chain with new retrievers
+        custom_llm = LambdaLLM()
+        rag_chain = RetrievalQA.from_chain_type(
+            llm=custom_llm,
+            retriever=hybrid_retriever,
+            return_source_documents=True
+        )
+        
+        print("✅ RAG chain refreshed successfully")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Failed to refresh RAG chain: {e}")
+        return False
+
 # Prompt formatting (this is where prompt engineering happens)
 def format_prompt(question: str, context: str) -> str:
     with open("context.txt", "a") as f:
@@ -99,191 +130,105 @@ def format_prompt_no_rag(question: str) -> str:
     """Format prompt for non-RAG responses"""
     with open("context.txt", "a") as f:
         f.write(f"\n\nQuestion (No RAG): {question}\n")
-    return f"""You are an intelligent assistant capable of holding conversations. Your response should be concise, informative, and helpful. Answer the user's question to the best of your knowledge. Answer in a smooth paragraph format.
+    return f"""You are an intelligent assistant capable of holding conversations. Your response should be concise, informative, and relevant to the user's questions. Answer within {max_new_tokens*4-100} characters.
 
     Question: {question}
+
     Answer:"""
 
-# LLM wrapper
-def call_llm(question: str, context: str) -> str:
-    """Call the LLM with question and context"""
-    global model, tokenizer, device
-    
-    # Initialize if needed
-    if model is None or tokenizer is None:
-        initialize_model()
-    
-    with open("config.json", "r") as f:
-        config = json.load(f)
-    max_new_tokens = config["max_new_tokens"]
-    
-    # Use the format_prompt function to create the final prompt
-    prompt = format_prompt(question, context)
-    
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.eos_token_id
-    )
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    return tokenizer.decode(outputs[0], skip_special_tokens=True).replace(prompt, "").strip()
-
-def call_llm_no_rag(question: str) -> str:
-    """Call the LLM without RAG context - fallback mode"""
-    global model, tokenizer, device
-    
-    # Initialize if needed
-    if model is None or tokenizer is None:
-        initialize_model()
-    
-    with open("config.json", "r") as f:
-        config = json.load(f)
-    max_new_tokens = config["max_new_tokens"]
-    
-    # Use the no-RAG prompt function
-    prompt = format_prompt_no_rag(question)
-    
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-        eos_token_id=tokenizer.eos_token_id,
-        pad_token_id=tokenizer.eos_token_id
-    )
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    return tokenizer.decode(outputs[0], skip_special_tokens=True).replace(prompt, "").strip()
-
+# Custom LLM wrapper for LangChain
 class LambdaLLM(LLM):
-    def _call(self, prompt: str, stop=None) -> str:
-        # Here we pass the context and question to the call_llm function
-        context = ""  # This will be handled by the RAG chain
-        return call_llm(prompt, context)
-
+    def _call(self, prompt: str, stop=None):
+        return generate_text(prompt)
+    
     @property
     def _llm_type(self) -> str:
-        return "custom_llm"
+        return "lambda"
 
+def generate_text(prompt: str) -> str:
+    """Generate text using the loaded model"""
+    initialize_model()  # Ensure model is loaded
+    
+    # Tokenize and generate
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048).to(device)
+    
+    # Generate response
+    with torch.no_grad():
+        outputs = model.generate(
+            inputs["input_ids"],
+            max_new_tokens=max_new_tokens,
+            temperature=0.7,
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id
+        )
+    
+    # Decode only the new tokens (response)
+    response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+    return response.strip()
 
-
-
-
-
-def generate_response(
-    query: str,
-    use_rag: bool = True,
-    fallback_on_error: bool = True,
-    user_id: str = None,
-    tenant_id: str = None
-) -> str:
+def generate_response(query: str, use_rag: bool = True, fallback_on_error: bool = True, user_id: str = None, tenant_id: str = None) -> str:
     """
-    Generate a response to the given query, filtered by user and tenant.
+    Generate response with optional RAG and fallback capabilities
+    Now includes automatic retriever reload checking
     """
-    global rag_chain
-
-    if not use_rag:
-        print("🔄 Using LLM without RAG (user preference)")
-        try:
-            response = call_llm_no_rag(query)
-            return partial_censor(response) if response else "I apologize, but I couldn't generate a response."
-        except Exception as e:
-            print(f"❌ Error in LLM-only mode: {e}")
-            return "I apologize, but I'm having technical difficulties and cannot generate a response right now."
-
     try:
-        if rag_chain is None:
+        if use_rag:
+            # Initialize RAG chain (will auto-reload if needed)
             initialize_rag_chain()
-
-        print("🔄 Using RAG pipeline")
-        # Manually retrieve docs, filter, and run LLM
-        retriever = rag_chain.retriever
-        docs = retriever.get_relevant_documents(query)
-
-        # This approach gives smarter responses in case the user hasn't uploaded any documents ---------------------------------------------
-        # Filter by tenant_id and user_id
-        # print("DOCS BEFORE FILTERING:", len(docs))
-        # print(docs[:2])
-        # only use the docs that are uploaded by the user or are public
-        if docs:
-            docs = [
-            doc for doc in docs
-            if not doc.metadata  # Include docs with no metadata
-            or doc.metadata.get("is_public")
-            or doc.metadata.get("user_id") == user_id
-            or ("is_public" not in doc.metadata and "user_id" not in doc.metadata)
-            ]
-
-        # Compose context from filtered docs
-        context = "\n".join([doc.page_content for doc in docs])
-        response = call_llm(query, context)
-        return partial_censor(response) if response else "I apologize, but I couldn't generate a response."
-
-    except Exception as e:
-        print(f"❌ Error in RAG pipeline: {e}")
-        if fallback_on_error:
-            print("🔄 Falling back to LLM without RAG")
-            try:
-                response = call_llm_no_rag(query)
-                if response and response.strip():
-                    return partial_censor(response)
+            
+            # Check if we need to refresh the RAG chain due to retriever updates
+            from backend.rag.retriever_manager import retriever_manager
+            if retriever_manager.should_reload_retrievers():
+                print("🔄 Detected retriever updates, refreshing RAG chain...")
+                if refresh_rag_chain():
+                    print("✅ RAG chain refreshed with updated retrievers")
                 else:
-                    return "I apologize, but I couldn't generate a proper response to your question."
-            except Exception as fallback_error:
-                print(f"❌ Error in fallback LLM: {fallback_error}")
-                return "I apologize, but I'm experiencing technical difficulties and cannot respond right now."
+                    print("❌ Failed to refresh RAG chain, using existing one")
+            
+            if rag_chain is None:
+                raise ValueError("RAG chain not initialized")
+            
+            print(f"🔍 Using RAG for query: {query[:50]}...")
+            
+            # Use RAG chain
+            result = rag_chain({"query": query})
+            response = result.get("result", "").strip()
+            
+            if response:
+                print(f"✅ RAG response generated: {len(response)} chars")
+                return response
+            else:
+                print("⚠️ RAG returned empty response")
+                if fallback_on_error:
+                    print("🔄 Falling back to non-RAG response...")
+                    return generate_response(query, use_rag=False, fallback_on_error=False, user_id=user_id, tenant_id=tenant_id)
+                return "I couldn't find relevant information to answer your question."
+        
         else:
-            return f"Error generating response with RAG: {str(e)}"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def generate_response_with_reranking(query: str, top_k: int = 2) -> str:
-    """
-    Generate a response using RAG with reranking.
-    Thread-safe for Celery workers.
-    """
-    try:
-        from backend.rag.retrieverconstruction import get_retrievers
-        from backend.response_generation.reranker import rerank_docs
-        
-        # Get retrievers
-        faiss_db, hybrid_retriever = get_retrievers()
-        
-        if hybrid_retriever is None:
-            return "Error: Retrievers not initialized"
-        
-        # Initialize model if needed
-        if model is None or tokenizer is None:
-            initialize_model()
-        
-        # Retrieve initial documents
-        docs = hybrid_retriever.get_relevant_documents(query)
-        
-        # Rerank the documents
-        reranked_docs = rerank_docs(query, docs, top_k=top_k)
-        
-        # Generate response using the reranked documents
-        context = "\n".join([doc.page_content for doc in reranked_docs])
-        return call_llm(query, context)
-        
+            # Non-RAG response
+            initialize_model()  # Ensure model is loaded
+            print(f"🤖 Using non-RAG for query: {query[:50]}...")
+            
+            prompt = format_prompt_no_rag(query)
+            response = generate_text(prompt)
+            
+            if response:
+                print(f"✅ Non-RAG response generated: {len(response)} chars")
+                return response
+            else:
+                return "I'm having trouble generating a response right now."
+    
     except Exception as e:
-        print(f"❌ Error in generate_response_with_reranking: {e}")
-        return f"Error generating response with reranking: {str(e)}"
+        print(f"❌ Error in generate_response: {e}")
+        
+        if use_rag and fallback_on_error:
+            print("🔄 RAG failed, falling back to non-RAG...")
+            try:
+                return generate_response(query, use_rag=False, fallback_on_error=False, user_id=user_id, tenant_id=tenant_id)
+            except Exception as fallback_error:
+                print(f"❌ Fallback also failed: {fallback_error}")
+        
+        return "I'm experiencing technical difficulties. Please try again later."
 
 # Test functions (for development)
 def test_response_generation():

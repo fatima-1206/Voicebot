@@ -63,6 +63,8 @@ def process_loaded_chunks(chunks):
     
     # Add your processing logic here
     from backend.rag import retrieverconstruction
+    from backend.rag.retriever_manager import signal_retrievers_updated
+    
     # Get or initialize retrievers (this will use caching now)
     faiss_db, hybrid_retriever = retrieverconstruction.get_retrievers()
 
@@ -81,6 +83,9 @@ def process_loaded_chunks(chunks):
             retrieverconstruction.hybrid_retriever = hybrid_retriever
             retrieverconstruction.faiss_retriever = faiss_retriever
             print("✅ Retrievers updated efficiently and global state updated")
+            
+            # Signal all other workers to reload retrievers
+            signal_retrievers_updated()
         else:
             print("❌ Failed to update retrievers")
     else:
@@ -99,29 +104,54 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
     Process an uploaded document and add it to both the vector database and PostgreSQL.
     """
     from backend.db.connection import SessionLocal
+    from backend.rag.retriever_manager import signal_retrievers_updated
+    
     db = SessionLocal()  # Create session inside task
     temp_path = None
 
     try:
-        chunk_ids=None
+        chunk_ids = None
+        chunk_data_for_db = []
+        
         # Import and get fresh references to retrievers
         from backend.rag import retrieverconstruction
 
         # Get or initialize retrievers (this will use caching now)
         faiss_db, hybrid_retriever = retrieverconstruction.get_retrievers()
 
-
         if faiss_db is None:
             print("❌ Failed to initialize FAISS vector store")
             raise ValueError("Failed to initialize FAISS vector store")
 
-
         print(f"✅ Retrieved FAISS DB: {faiss_db is not None}")
         print(f"✅ Retrieved Hybrid Retriever: {hybrid_retriever is not None}")
-        if not (chunks_given and chunks):
-
+        
+        if chunks_given and chunks:
+            # Processing pre-loaded chunks (from MongoDB or other sources)
+            print(f"🔄 Processing {len(chunks)} pre-loaded chunks...")
+            
+            # Convert serialized chunks back to LangChain Document objects if needed
+            langchain_chunks = []
+            for chunk in chunks:
+                if isinstance(chunk, dict):
+                    # Convert dictionary back to LangChain Document
+                    langchain_chunks.append(LC_Document(
+                        page_content=chunk.get("page_content", ""),
+                        metadata=chunk.get("metadata", {})
+                    ))
+                elif isinstance(chunk, LC_Document):
+                    # Already a LangChain Document
+                    langchain_chunks.append(chunk)
+                else:
+                    print(f"⚠️ Warning: Unknown chunk type: {type(chunk)}")
+                    continue
+            
+            chunks = langchain_chunks
+            print(f"📝 Converted {len(chunks)} chunks to LangChain Document format")
+            
+        else:
+            # Processing file upload
             print(f"🔄 Task started for document: {filename} (doc_id: {doc_id})")
-
 
             # Convert string UUIDs to UUID objects
             doc_id = UUID(doc_id) if isinstance(doc_id, str) else doc_id
@@ -182,24 +212,8 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
             print(f"📝 Created {len(chunks)} chunks from document")
 
         # Step 4: Add to FAISS vectorstore and update retrievers
+        retrievers_updated = False
         if len(chunks) > 0:
-            langchain_chunks = []
-            for chunk in chunks:
-                if isinstance(chunk, dict):
-                    # Convert dictionary back to LangChain Document
-                    langchain_chunks.append(LC_Document(
-                        page_content=chunk.get("page_content", ""),
-                        metadata=chunk.get("metadata", {})
-                    ))
-                elif isinstance(chunk, LC_Document):
-                    # Already a LangChain Document
-                    langchain_chunks.append(chunk)
-                else:
-                    print(f"⚠️ Warning: Unknown chunk type: {type(chunk)}")
-                    continue
-            
-            print(f"📝 Converted {len(langchain_chunks)} chunks to LangChain Document format")
-            chunks = langchain_chunks  # Update chunks to be LangChain Documents        
             print(f"📝 Adding {len(chunks)} chunks to FAISS vector store...")
             if chunk_ids:
                 faiss_db.add_documents(chunks, ids=chunk_ids)
@@ -216,18 +230,28 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
                 retrieverconstruction.hybrid_retriever = hybrid_retriever
                 retrieverconstruction.faiss_retriever = faiss_retriever
                 print("✅ Retrievers updated efficiently")
+                retrievers_updated = True
             else:
                 print("❌ Failed to update retrievers")
         else:
             print("⚠️ Warning: No chunks created from document, skipping FAISS update")
 
+        # Early return for pre-loaded chunks (no database operations needed)
         if chunks_given and chunks:
-            db.commit()
+            print("✅ Pre-loaded chunks processed successfully, skipping database operations")
+            
+            # Signal retriever update if successful
+            if retrievers_updated:
+                signal_retrievers_updated()
+                
             return {
                 "status": "success",
-                "chunks_saved": len(chunks)
+                "chunks_created": len(chunks),
+                "chunks_saved": 0,  # No database saves for pre-loaded chunks
+                "message": f"Processed {len(chunks)} pre-loaded chunks successfully"
             }
-        # Step 6: Update document metadata in PostgreSQL (don't create new, update existing)
+
+        # Step 6: Update document metadata in PostgreSQL (only for file uploads)
         print(f"💾 Updating document metadata in PostgreSQL...")
         existing_doc = db.query(DB_Document).filter(DB_Document.id == doc_id).first()
         if existing_doc:
@@ -254,7 +278,7 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         db.flush()
 
         # Step 7: Store chunks in database
-        print(f"💾 Saving {len(chunks)} chunks to PostgreSQL...")
+        print(f"💾 Saving {len(chunk_data_for_db)} chunks to PostgreSQL...")
         chunks_saved = 0
         for chunk_id, chunk_text in chunk_data_for_db:
             try:
@@ -268,11 +292,14 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
             except Exception as chunk_error:
                 print(f"❌ Error saving chunk {chunk_id}: {chunk_error}")
 
-
         # Commit all changes
         print("💾 Committing changes to database...")
         db.commit()
         print(f"✅ Successfully saved {chunks_saved} chunks to PostgreSQL")
+        
+        # Signal retriever update if successful
+        if retrievers_updated:
+            signal_retrievers_updated()
         
         return {
             "status": "success",
@@ -283,12 +310,11 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         }
 
     except Exception as e:
-        print(f"❌ Error processing document '{filename}': {str(e)}")
+        print(f"❌ Error processing document: {str(e)}")
         db.rollback()
         raise e
     
     finally:
-
         db.close()  # Always close the session
         # Clean up temp file and free memory
         if temp_path and os.path.exists(temp_path):

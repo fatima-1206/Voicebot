@@ -348,6 +348,7 @@ class VoicebotSTTClient:
                     (silence_duration >= max_silence_duration or frames_collected >= self.max_buffer_size)
                 )
 
+
                 if chunk_ready:
                     # Concatenate and send the buffered audio
                     final_audio = np.concatenate(buffer)

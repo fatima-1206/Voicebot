@@ -423,7 +423,7 @@ async def handle_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str
 
 # NEW HANDLER FUNCTION
 async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
-    """Handle tiny audio chunks - accumulate until we have a complete utterance"""
+    """Handle tiny audio chunks - accumulate and process with VAD"""
     audio_chunk_base64 = data.get("audio")
     if not audio_chunk_base64:
         return
@@ -431,24 +431,28 @@ async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str,
     try:
         audio_bytes = base64.b64decode(audio_chunk_base64)
         
-        # Use the improved audio manager's append method
+        # Just append to buffer - no VAD in buffer manager
         result = audio_buffer_manager.append_audio(key, audio_bytes)
+        current_buffer_size = result.get("buffer_size", 0)
         
-        # Check if the audio manager detected completed speech segments
-        if result.get("status") == "speech_detected":
-            segments = result.get("segments", [])
+        # Only check for speech if we have enough data
+        min_processing_threshold = 16000  # 1 second at 16kHz
+        
+        if current_buffer_size >= min_processing_threshold:
+            # Get buffer for VAD processing
+            current_buffer = audio_buffer_manager.get_buffer(key)
             
-            for segment_bytes in segments:
-                # Convert segment to proper format for processing
-                segment_audio = bytes_to_numpy_audio(segment_bytes)
-                if segment_audio is not None and len(segment_audio) > 0:
-                    segment_tensor = torch.from_numpy(segment_audio).float()
-                    segment_tensor = torch.clamp(segment_tensor, -1.0, 1.0)
+            if len(current_buffer) > 0:
+                # Convert buffer to proper format for VAD
+                buffer_audio = bytes_to_numpy_audio(bytes(current_buffer))
+                if buffer_audio is not None and len(buffer_audio) > 0:
+                    buffer_tensor = torch.from_numpy(buffer_audio).float()
+                    buffer_tensor = torch.clamp(buffer_tensor, -1.0, 1.0)
                     
-                    # Get speech timestamps for the segment
+                    # Apply VAD to detect speech segments
                     from backend.workers.stt_tasks import get_speech_timestamps
                     speech_timestamps = get_speech_timestamps(
-                        segment_tensor, 
+                        buffer_tensor, 
                         vad_model, 
                         sampling_rate=sample_rate,
                         threshold=0.2,
@@ -457,52 +461,124 @@ async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str,
                         speech_pad_ms=50
                     )
                     
-                    if speech_timestamps:
-                        # Convert back to bytes for processing
-                        int16_audio = np.clip(segment_tensor.numpy(), -1.0, 1.0)
-                        int16_audio = (int16_audio * 32767).astype(np.int16)
-                        audio_bytes_processed = int16_audio.tobytes()
+                    if speech_timestamps and len(speech_timestamps) > 1:
+                        # Process all segments except the last one
+                        segments_to_process = speech_timestamps[:-1]  # Exclude last segment
                         
-                        # Send for processing
-                        from backend.workers.stt_tasks import process_continuous_audio_task
-                        chunk_id = data.get("chunk_id", str(uuid4()))
-                        
-                        process_continuous_audio_task.delay(
-                            speech_bytes=audio_bytes_processed,
-                            speech_timestamps=speech_timestamps,
-                            user_id=user_id,
-                            tenant_id=tenant_id,
-                            device_id=device_id,
-                            buffer_key=key,
-                            tts_language=data.get("tts_language", "en"),
-                            voice=data.get("voice", "Fritz-PlayAI"),
-                            auto_respond=data.get("auto_respond", True),
-                            chunk_id=chunk_id,
-                            use_rag=data.get("rag", True)
-                        )
-                        
-                        logger.info(f"✅ Speech segment processed: {len(speech_timestamps)} segments, chunk_id: {chunk_id}")
-                        
-                        # Send acknowledgment back to client
-                        await websocket.send_json({
-                            "type": "audio_chunk_processed",
-                            "chunk_id": chunk_id,
-                            "reason": "speech_detected_by_vad",
-                            "speech_segments": len(speech_timestamps),
-                            "buffer_duration_ms": len(segment_tensor) * 1000 / sample_rate,
-                            "device_id": device_id
-                        })
+                        if segments_to_process:
+                            # Calculate the end of the last segment to process
+                            last_processed_sample = segments_to_process[-1]['end']
+                            
+                            # Extract audio up to the end of the last segment to process
+                            audio_to_process = buffer_tensor[:last_processed_sample]
+                            
+                            # Convert to bytes for processing
+                            int16_audio = np.clip(audio_to_process.numpy(), -1.0, 1.0)
+                            int16_audio = (int16_audio * 32767).astype(np.int16)
+                            audio_bytes_processed = int16_audio.tobytes()
+                            
+                            # Keep the remaining audio (from last processed segment end to buffer end) in buffer
+                            remaining_audio = buffer_tensor[last_processed_sample:]
+                            remaining_int16 = np.clip(remaining_audio.numpy(), -1.0, 1.0)
+                            remaining_int16 = (remaining_int16 * 32767).astype(np.int16)
+                            remaining_bytes = remaining_int16.tobytes()
+                            
+                            # Clear buffer and add back the remaining audio
+                            audio_buffer_manager.clear_buffer(key)
+                            audio_buffer_manager.append_audio(key, remaining_bytes)
+                            
+                            # Send processed audio for transcription
+                            from backend.workers.stt_tasks import process_continuous_audio_task
+                            chunk_id = data.get("chunk_id", str(uuid4()))
+                            
+                            process_continuous_audio_task.delay(
+                                speech_bytes=audio_bytes_processed,
+                                speech_timestamps=segments_to_process,  # Only processed segments
+                                user_id=user_id,
+                                tenant_id=tenant_id,
+                                device_id=device_id,
+                                buffer_key=key,
+                                tts_language=data.get("tts_language", "en"),
+                                voice=data.get("voice", "Fritz-PlayAI"),
+                                auto_respond=data.get("auto_respond", True),
+                                chunk_id=chunk_id,
+                                use_rag=data.get("rag", True)
+                            )
+                            
+                            logger.info(f"✅ Buffer processed (excluding last segment): {len(segments_to_process)} segments processed, 1 segment kept in buffer, chunk_id: {chunk_id}")
+                            
+                            # Send acknowledgment back to client
+                            await websocket.send_json({
+                                "type": "audio_chunk_processed",
+                                "chunk_id": chunk_id,
+                                "reason": "buffer_processed_excluding_last_segment",
+                                "speech_segments_processed": len(segments_to_process),
+                                "speech_segments_remaining": 1,
+                                "buffer_duration_ms": len(audio_to_process) * 1000 / sample_rate,
+                                "remaining_duration_ms": len(remaining_audio) * 1000 / sample_rate,
+                                "device_id": device_id
+                            })
+                    
+                    elif speech_timestamps and len(speech_timestamps) == 1:
+                        # Single segment - check if buffer is getting too large or wait for timeout
+                        max_single_segment_buffer = 64000  # 4 seconds
+                        # if current_buffer_size >= max_single_segment_buffer:
+                        #     # Process the single segment because buffer is getting too large
+                            
+                        #     # Convert entire buffer to bytes for processing
+                        #     int16_audio = np.clip(buffer_tensor.numpy(), -1.0, 1.0)
+                        #     int16_audio = (int16_audio * 32767).astype(np.int16)
+                        #     audio_bytes_processed = int16_audio.tobytes()
+                            
+                        #     # Clear the buffer since we're processing everything
+                        #     audio_buffer_manager.clear_buffer(key)
+                            
+                        #     # Send processed audio for transcription
+                        #     from backend.workers.stt_tasks import process_continuous_audio_task
+                        #     chunk_id = data.get("chunk_id", str(uuid4()))
+                            
+                        #     process_continuous_audio_task.delay(
+                        #         speech_bytes=audio_bytes_processed,
+                        #         speech_timestamps=speech_timestamps,  # Use the single segment timestamps
+                        #         user_id=user_id,
+                        #         tenant_id=tenant_id,
+                        #         device_id=device_id,
+                        #         buffer_key=key,
+                        #         tts_language=data.get("tts_language", "en"),
+                        #         voice=data.get("voice", "Fritz-PlayAI"),
+                        #         auto_respond=data.get("auto_respond", True),
+                        #         chunk_id=chunk_id,
+                        #         use_rag=data.get("rag", True)
+                        #     )
+                            
+                        #     logger.info(f"✅ Single segment processed (buffer too large): chunk_id: {chunk_id}")
+                            
+                        #     # Send acknowledgment back to client
+                        #     await websocket.send_json({
+                        #         "type": "audio_chunk_processed",
+                        #         "chunk_id": chunk_id,
+                        #         "reason": "single_segment_buffer_too_large",
+                        #         "speech_segments_processed": len(speech_timestamps),
+                        #         "speech_segments_remaining": 0,
+                        #         "buffer_duration_ms": len(buffer_tensor) * 1000 / sample_rate,
+                        #         "device_id": device_id
+                        #     })
+                        # else:
+                        #     # Single segment, buffer not too large - keep waiting
+                        #     pass
+                    
+                    # If buffer is getting too large without speech, trim it
+                    elif current_buffer_size > 64000:  # 4 seconds
+                        audio_buffer_manager.trim_buffer_to_last_n_bytes(key, 16000)  # Keep last 1 second
+                        logger.debug(f"🔇 Trimmed non-speech buffer for {key}")
         
-        elif result.get("status") == "processing":
-            # Still accumulating - send status update occasionally
-            current_buffer = audio_buffer_manager.get_buffer(key)
-            if len(current_buffer) % 32000 == 0:  # Every ~2 seconds
-                await websocket.send_json({
-                    "type": "audio_chunk_accumulating",
-                    "buffer_duration_ms": len(current_buffer) * 1000 / (sample_rate * 2),  # 2 bytes per sample
-                    "speech_segments": 0,
-                    "device_id": device_id
-                })
+        # Send status update occasionally
+        if current_buffer_size > 0 and current_buffer_size % 32000 == 0:  # Every ~2 seconds
+            await websocket.send_json({
+                "type": "audio_chunk_accumulating",
+                "buffer_duration_ms": current_buffer_size * 1000 / (sample_rate * 2),  # 2 bytes per sample
+                "device_id": device_id
+            })
     
     except Exception as e:
         logger.error(f"❌ Error processing audio chunk: {e}")
@@ -511,6 +587,14 @@ async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str,
             "message": f"Error processing audio chunk: {str(e)}",
             "device_id": device_id
         })
+
+
+
+
+
+
+
+
 
 
 async def handle_audio_stream_end(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):

@@ -423,7 +423,7 @@ async def handle_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str
 
 # NEW HANDLER FUNCTION
 async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
-    """Handle tiny audio chunks - accumulate and process with VAD"""
+    """Handle tiny audio chunks - accumulate and process with VAD, less aggressive processing"""
     audio_chunk_base64 = data.get("audio")
     if not audio_chunk_base64:
         return
@@ -435,8 +435,8 @@ async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str,
         result = audio_buffer_manager.append_audio(key, audio_bytes)
         current_buffer_size = result.get("buffer_size", 0)
         
-        # Only check for speech if we have enough data
-        min_processing_threshold = 16000  # 1 second at 16kHz
+        # Be less aggressive - wait for more audio before processing
+        min_processing_threshold = 32000  # 2 seconds at 16kHz (was 1 second)
         
         if current_buffer_size >= min_processing_threshold:
             # Get buffer for VAD processing
@@ -449,43 +449,56 @@ async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str,
                     buffer_tensor = torch.from_numpy(buffer_audio).float()
                     buffer_tensor = torch.clamp(buffer_tensor, -1.0, 1.0)
                     
-                    # Apply VAD to detect speech segments
+                    # Apply VAD to detect speech segments - more lenient settings
                     from backend.workers.stt_tasks import get_speech_timestamps
                     speech_timestamps = get_speech_timestamps(
                         buffer_tensor, 
                         vad_model, 
                         sampling_rate=sample_rate,
-                        threshold=0.2,
-                        min_speech_duration_ms=300,
-                        min_silence_duration_ms=100,
-                        speech_pad_ms=50
+                        threshold=0.3,  # Higher threshold - be more sure it's speech
+                        min_speech_duration_ms=500,  # Longer minimum speech duration
+                        min_silence_duration_ms=300,  # Longer silence before considering speech ended
+                        speech_pad_ms=100
                     )
                     
-                    if speech_timestamps and len(speech_timestamps) > 1:
-                        # Process all segments except the last one
-                        segments_to_process = speech_timestamps[:-1]  # Exclude last segment
+                    # Check if we have a clear end of speech (silence after speech)
+                    has_clear_speech_end = False
+                    if speech_timestamps:
+                        last_segment = speech_timestamps[-1]
+                        last_speech_end = last_segment['end']
+                        buffer_end = len(buffer_tensor)
+                        silence_after_speech = (buffer_end - last_speech_end) / sample_rate  # seconds of silence
                         
-                        if segments_to_process:
-                            # Calculate the end of the last segment to process
-                            last_processed_sample = segments_to_process[-1]['end']
-                            
-                            # Extract audio up to the end of the last segment to process
-                            audio_to_process = buffer_tensor[:last_processed_sample]
-                            
-                            # Convert to bytes for processing
-                            int16_audio = np.clip(audio_to_process.numpy(), -1.0, 1.0)
+                        # Consider speech "ended" if we have more than 1.5 seconds of silence after last speech
+                        has_clear_speech_end = silence_after_speech > 1.5
+                    
+                    # Only process if we have multiple segments OR clear end of speech OR buffer is very large
+                    should_process = False
+                    process_all_segments = False
+                    
+                    if speech_timestamps and len(speech_timestamps) > 1 and has_clear_speech_end:
+                        # Multiple segments with clear speech end - process all
+                        should_process = True
+                        process_all_segments = True
+                        
+                    elif speech_timestamps and len(speech_timestamps) >= 1 and has_clear_speech_end:
+                        # Single segment but clear speech end - process it
+                        should_process = True
+                        process_all_segments = True
+                        
+                    elif current_buffer_size >= 160000:  # 10 seconds - force processing
+                        should_process = True
+                        process_all_segments = True
+                        
+                    if should_process:
+                        if process_all_segments:
+                            # Process entire buffer - complete utterance
+                            int16_audio = np.clip(buffer_tensor.numpy(), -1.0, 1.0)
                             int16_audio = (int16_audio * 32767).astype(np.int16)
                             audio_bytes_processed = int16_audio.tobytes()
                             
-                            # Keep the remaining audio (from last processed segment end to buffer end) in buffer
-                            remaining_audio = buffer_tensor[last_processed_sample:]
-                            remaining_int16 = np.clip(remaining_audio.numpy(), -1.0, 1.0)
-                            remaining_int16 = (remaining_int16 * 32767).astype(np.int16)
-                            remaining_bytes = remaining_int16.tobytes()
-                            
-                            # Clear buffer and add back the remaining audio
+                            # Clear the buffer since we're processing everything
                             audio_buffer_manager.clear_buffer(key)
-                            audio_buffer_manager.append_audio(key, remaining_bytes)
                             
                             # Send processed audio for transcription
                             from backend.workers.stt_tasks import process_continuous_audio_task
@@ -493,7 +506,7 @@ async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str,
                             
                             process_continuous_audio_task.delay(
                                 speech_bytes=audio_bytes_processed,
-                                speech_timestamps=segments_to_process,  # Only processed segments
+                                speech_timestamps=speech_timestamps,
                                 user_id=user_id,
                                 tenant_id=tenant_id,
                                 device_id=device_id,
@@ -505,75 +518,66 @@ async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str,
                                 use_rag=data.get("rag", True)
                             )
                             
-                            logger.info(f"✅ Buffer processed (excluding last segment): {len(segments_to_process)} segments processed, 1 segment kept in buffer, chunk_id: {chunk_id}")
+                            logger.info(f"✅ Complete utterance processed: {len(speech_timestamps)} segments, chunk_id: {chunk_id}")
                             
                             # Send acknowledgment back to client
                             await websocket.send_json({
                                 "type": "audio_chunk_processed",
                                 "chunk_id": chunk_id,
-                                "reason": "buffer_processed_excluding_last_segment",
-                                "speech_segments_processed": len(segments_to_process),
-                                "speech_segments_remaining": 1,
-                                "buffer_duration_ms": len(audio_to_process) * 1000 / sample_rate,
-                                "remaining_duration_ms": len(remaining_audio) * 1000 / sample_rate,
+                                "reason": "complete_utterance_processed",
+                                "speech_segments_processed": len(speech_timestamps),
+                                "speech_segments_remaining": 0,
+                                "buffer_duration_ms": len(buffer_tensor) * 1000 / sample_rate,
                                 "device_id": device_id
                             })
+                        
+                        else:
+                            # Process all but last segment (old behavior - rarely used now)
+                            segments_to_process = speech_timestamps[:-1]
+                            
+                            if segments_to_process:
+                                last_processed_sample = segments_to_process[-1]['end']
+                                audio_to_process = buffer_tensor[:last_processed_sample]
+                                
+                                int16_audio = np.clip(audio_to_process.numpy(), -1.0, 1.0)
+                                int16_audio = (int16_audio * 32767).astype(np.int16)
+                                audio_bytes_processed = int16_audio.tobytes()
+                                
+                                # Keep remaining audio
+                                remaining_audio = buffer_tensor[last_processed_sample:]
+                                remaining_int16 = np.clip(remaining_audio.numpy(), -1.0, 1.0)
+                                remaining_int16 = (remaining_int16 * 32767).astype(np.int16)
+                                remaining_bytes = remaining_int16.tobytes()
+                                
+                                audio_buffer_manager.clear_buffer(key)
+                                audio_buffer_manager.append_audio(key, remaining_bytes)
+                                
+                                from backend.workers.stt_tasks import process_continuous_audio_task
+                                chunk_id = data.get("chunk_id", str(uuid4()))
+                                
+                                process_continuous_audio_task.delay(
+                                    speech_bytes=audio_bytes_processed,
+                                    speech_timestamps=segments_to_process,
+                                    user_id=user_id,
+                                    tenant_id=tenant_id,
+                                    device_id=device_id,
+                                    buffer_key=key,
+                                    tts_language=data.get("tts_language", "en"),
+                                    voice=data.get("voice", "Fritz-PlayAI"),
+                                    auto_respond=data.get("auto_respond", True),
+                                    chunk_id=chunk_id,
+                                    use_rag=data.get("rag", True)
+                                )
+                                
+                                logger.info(f"✅ Partial processing: {len(segments_to_process)} segments processed, 1 segment kept, chunk_id: {chunk_id}")
                     
-                    elif speech_timestamps and len(speech_timestamps) == 1:
-                        # Single segment - check if buffer is getting too large or wait for timeout
-                        max_single_segment_buffer = 64000  # 4 seconds
-                        # if current_buffer_size >= max_single_segment_buffer:
-                        #     # Process the single segment because buffer is getting too large
-                            
-                        #     # Convert entire buffer to bytes for processing
-                        #     int16_audio = np.clip(buffer_tensor.numpy(), -1.0, 1.0)
-                        #     int16_audio = (int16_audio * 32767).astype(np.int16)
-                        #     audio_bytes_processed = int16_audio.tobytes()
-                            
-                        #     # Clear the buffer since we're processing everything
-                        #     audio_buffer_manager.clear_buffer(key)
-                            
-                        #     # Send processed audio for transcription
-                        #     from backend.workers.stt_tasks import process_continuous_audio_task
-                        #     chunk_id = data.get("chunk_id", str(uuid4()))
-                            
-                        #     process_continuous_audio_task.delay(
-                        #         speech_bytes=audio_bytes_processed,
-                        #         speech_timestamps=speech_timestamps,  # Use the single segment timestamps
-                        #         user_id=user_id,
-                        #         tenant_id=tenant_id,
-                        #         device_id=device_id,
-                        #         buffer_key=key,
-                        #         tts_language=data.get("tts_language", "en"),
-                        #         voice=data.get("voice", "Fritz-PlayAI"),
-                        #         auto_respond=data.get("auto_respond", True),
-                        #         chunk_id=chunk_id,
-                        #         use_rag=data.get("rag", True)
-                        #     )
-                            
-                        #     logger.info(f"✅ Single segment processed (buffer too large): chunk_id: {chunk_id}")
-                            
-                        #     # Send acknowledgment back to client
-                        #     await websocket.send_json({
-                        #         "type": "audio_chunk_processed",
-                        #         "chunk_id": chunk_id,
-                        #         "reason": "single_segment_buffer_too_large",
-                        #         "speech_segments_processed": len(speech_timestamps),
-                        #         "speech_segments_remaining": 0,
-                        #         "buffer_duration_ms": len(buffer_tensor) * 1000 / sample_rate,
-                        #         "device_id": device_id
-                        #     })
-                        # else:
-                        #     # Single segment, buffer not too large - keep waiting
-                        #     pass
-                    
-                    # If buffer is getting too large without speech, trim it
-                    elif current_buffer_size > 64000:  # 4 seconds
-                        audio_buffer_manager.trim_buffer_to_last_n_bytes(key, 16000)  # Keep last 1 second
-                        logger.debug(f"🔇 Trimmed non-speech buffer for {key}")
+                    # If buffer is getting extremely large without speech, trim it
+                    elif current_buffer_size > 320000:  # 20 seconds
+                        audio_buffer_manager.trim_buffer_to_last_n_bytes(key, 32000)  # Keep last 2 seconds
+                        logger.debug(f"🔇 Trimmed very large non-speech buffer for {key}")
         
-        # Send status update occasionally
-        if current_buffer_size > 0 and current_buffer_size % 32000 == 0:  # Every ~2 seconds
+        # Send status update less frequently
+        if current_buffer_size > 0 and current_buffer_size % 64000 == 0:  # Every ~4 seconds
             await websocket.send_json({
                 "type": "audio_chunk_accumulating",
                 "buffer_duration_ms": current_buffer_size * 1000 / (sample_rate * 2),  # 2 bytes per sample

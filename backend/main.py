@@ -455,9 +455,9 @@ async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str,
                         buffer_tensor, 
                         vad_model, 
                         sampling_rate=sample_rate,
-                        threshold=0.3,  # Higher threshold - be more sure it's speech
+                        threshold=0.2,  # Higher threshold - be more sure it's speech
                         min_speech_duration_ms=500,  # Longer minimum speech duration
-                        min_silence_duration_ms=300,  # Longer silence before considering speech ended
+                        min_silence_duration_ms=200,  # Longer silence before considering speech ended
                         speech_pad_ms=100
                     )
                     

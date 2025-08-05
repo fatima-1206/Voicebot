@@ -38,12 +38,12 @@ class AudioBufferManager:
         with self._lock:
             current_buffer = self.user_audio_buffers[key]
             
-            # Check if adding this data would exceed the limit
-            if len(current_buffer) + len(audio_bytes) > self.max_buffer_size:
-                # Trim the buffer to half size to make room
-                trim_size = self.max_buffer_size // 2
-                current_buffer[:] = current_buffer[-trim_size:]
-                logger.warning(f"⚠️ Buffer trimmed for {key}, was too large")
+            # # Check if adding this data would exceed the limit
+            # if len(current_buffer) + len(audio_bytes) > self.max_buffer_size:
+            #     # Trim the buffer to half size to make room
+            #     trim_size = self.max_buffer_size // 2
+            #     current_buffer[:] = current_buffer[-trim_size:]
+            #     logger.warning(f"⚠️ Buffer trimmed for {key}, was too large")
             
             current_buffer.extend(audio_bytes)
             self.user_last_activity[key] = time.time()

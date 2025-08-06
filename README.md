@@ -330,7 +330,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
             <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/fastapi/fastapi-original.svg" width="40"/><br/>FastAPI
         </td>
         <td align="center">
-            <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/redis/redis-original.svg" width="40"/><br/>Redis
+            <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/redis/redis-original.svg" width="45"/><br/>Redis
         </td>
         <td align="center">
             <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/1/19/Celery_logo.png/250px-Celery_logo.png" width="50"/><br/>Celery
@@ -339,7 +339,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
             <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/pytorch/pytorch-original.svg" width="40"/><br/>PyTorch
         </td>
         <td align="center">
-            <img src="https://huggingface.co/front/assets/huggingface_logo-noborder.svg" width="40"/><br/>Hugging Face
+            <img src="https://huggingface.co/front/assets/huggingface_logo-noborder.svg" width="45"/><br/>Hugging Face
         </td>
         <!-- <td align="center">
             <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/openai/openai-original.svg" width="40"/><br/>OpenAI
@@ -348,7 +348,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
             <img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/docker/docker-original.svg" width="40"/><br/>Docker
         </td> -->
         <td align="center">
-            <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/c/cd/WebSocket_colored_logo.svg/250px-WebSocket_colored_logo.svg.png
-            " width="40"/><br/>Websockets
+            <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/c/cd/WebSocket_colored_logo.svg/250px-WebSocket_colored_logo.svg.png" width="40"/><br/>Websockets
         </td>
 </table>

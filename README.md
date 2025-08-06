@@ -63,7 +63,7 @@ sudo apt update && sudo apt install -y \
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/your-org/voicebot
+git clone https://github.com/fatima-1206/voicebot
 cd voicebot
 ```
 

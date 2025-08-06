@@ -2,28 +2,27 @@ import asyncio
 import time
 import threading
 from collections import defaultdict
-from typing import Dict, Any
+from typing import Dict, Any, List
 import logging
-import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Audio buffer management with size limits and proper cleanup
 class AudioBufferManager:
-    """Improved audio buffer management with size limits and cleanup"""
+    """Simple audio buffer management - just stores and manages audio buffers"""
     
-    def __init__(self, max_buffer_size: int = 1024 * 1024):  # Reduce to 1MB
+    def __init__(self, max_buffer_size: int = 2 * 1024 * 1024):  # 2MB per buffer
         self.user_audio_buffers: Dict[str, bytearray] = defaultdict(bytearray)
         self.user_last_activity: Dict[str, float] = defaultdict(float)
-        self.max_buffer_size = max_buffer_size  # 1MB default
-        self.max_idle_time = 300  # 5 minutes default
+        self.max_buffer_size = max_buffer_size
+        self.max_idle_time = 300  # 5 minutes
         self._lock = threading.RLock()
-        
+
         # Add automatic cleanup timer
         asyncio.create_task(self._periodic_cleanup())
-    
+        
     async def _periodic_cleanup(self):
+        """Periodic cleanup"""
         while True:
             await asyncio.sleep(30)  # Clean up every 30 seconds
             self.cleanup_stale_buffers()
@@ -33,23 +32,32 @@ class AudioBufferManager:
         with self._lock:
             self.user_last_activity[key] = time.time()
             return self.user_audio_buffers[key]
-    
-    def append_audio(self, key: str, audio_bytes: bytes) -> bool:
-        """Append audio data with size checking"""
+
+    def append_audio(self, key: str, audio_bytes: bytes) -> Dict[str, Any]:
+        """Append audio data to buffer"""
         with self._lock:
             current_buffer = self.user_audio_buffers[key]
             
-            # Check if adding this data would exceed the limit
-            if len(current_buffer) + len(audio_bytes) > self.max_buffer_size:
-                # Trim the buffer to half size to make room
-                trim_size = self.max_buffer_size // 2
-                current_buffer[:] = current_buffer[-trim_size:]
-                logger.warning(f"⚠️ Buffer trimmed for {key}, was too large")
+            # # Check if adding this data would exceed the limit
+            # if len(current_buffer) + len(audio_bytes) > self.max_buffer_size:
+            #     # Trim the buffer to half size to make room
+            #     trim_size = self.max_buffer_size // 2
+            #     current_buffer[:] = current_buffer[-trim_size:]
+            #     logger.warning(f"⚠️ Buffer trimmed for {key}, was too large")
             
             current_buffer.extend(audio_bytes)
             self.user_last_activity[key] = time.time()
-            return True
-    
+            
+            return {
+                "status": "appended",
+                "buffer_size": len(current_buffer)
+            }
+
+    def get_buffer_size(self, key: str) -> int:
+        """Get current buffer size"""
+        with self._lock:
+            return len(self.user_audio_buffers[key])
+
     def get_and_clear_buffer(self, key: str) -> bytes:
         """Get buffer contents and clear it"""
         with self._lock:
@@ -57,7 +65,7 @@ class AudioBufferManager:
             self.user_audio_buffers[key].clear()
             self.user_last_activity[key] = time.time()
             return buffer_data
-    
+
     def clear_buffer(self, key: str):
         """Clear a specific buffer"""
         with self._lock:
@@ -65,6 +73,13 @@ class AudioBufferManager:
                 del self.user_audio_buffers[key]
             if key in self.user_last_activity:
                 del self.user_last_activity[key]
+
+    def trim_buffer_to_last_n_bytes(self, key: str, n_bytes: int):
+        """Keep only the last n bytes in the buffer"""
+        with self._lock:
+            current_buffer = self.user_audio_buffers[key]
+            if len(current_buffer) > n_bytes:
+                current_buffer[:] = current_buffer[-n_bytes:]
     
     def cleanup_stale_buffers(self) -> int:
         """Clean up buffers that have been idle too long"""

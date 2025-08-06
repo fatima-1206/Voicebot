@@ -315,9 +315,9 @@ uvicorn backend.main:app --log-level debug
 4. Push to branch: `git push origin feature/new-feature`
 5. Submit a pull request
 
-## License
+<!-- ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details. -->
 
 
 

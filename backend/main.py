@@ -156,31 +156,25 @@ def validate_websocket_message(data: dict) -> tuple[bool, str]:
 
 @app.websocket("/ws/{tenant_id}/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str, device_id: Optional[str] = Query(None)):
-    # First, authenticate the token before accepting the connection
-    # try:
-    #     user_data = verify_websocket_token(token)
-    #     if user_data.get("tenant_id") != tenant_id or user_data.get("user_id") != user_id:
-    #         await websocket.close(code=1008, reason="Unauthorized")
-    #         return
-    # except Exception:
-    #     await websocket.close(code=1008, reason="Invalid token")
-    #     return
-    
-    # Accept the WebSocket connection FIRST
     await websocket.accept()
     
-    # Now we can send messages
     if not device_id:
         device_id = str(uuid4())
     
+    # Generate unique session ID for this connection
     session_id = str(uuid4())
+    
+    # Send session info to client
     await websocket.send_json({
         "type": "session_info", 
         "session_id": session_id,
-        "device_id": device_id
+        "device_id": device_id,
+        "tenant_id": tenant_id,
+        "user_id": user_id
     })
     
-    if not await manager.connect(tenant_id, user_id, websocket, device_id):
+    # Connect using the new session-based structure
+    if not await manager.connect(tenant_id, user_id, websocket, session_id, device_id):
         return
 
     try:
@@ -203,7 +197,7 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str,
                 continue
 
             try:
-                await process_websocket_message(websocket, tenant_id, user_id, data, session_id)
+                await process_websocket_message(websocket, tenant_id, user_id, data, session_id, device_id)
             except Exception as e:
                 logger.error(f"❌ Error processing WebSocket message: {e}\n{data}")
                 await websocket.send_json({
@@ -212,28 +206,39 @@ async def websocket_endpoint(websocket: WebSocket, tenant_id: str, user_id: str,
                 })
 
     except WebSocketDisconnect:
-        logger.info(f"🔌 WebSocket disconnected: {tenant_id}:{user_id}:{session_id}")
+        logger.info(f"🔌 WebSocket disconnected: {tenant_id}|{user_id}|{device_id}|{session_id}")
     finally:
-        audio_buffer_manager.clear_buffer(session_id)
-        redis_manager.revoke_all_tasks(session_id)
-        manager.disconnect(tenant_id, user_id)
+        # Cleanup using session-based keys
+        session_buffer_key = f"{tenant_id}_{user_id}_{device_id}_{session_id}"
+        audio_buffer_manager.clear_buffer(session_buffer_key)
+        
+        # Use proper session key format for Redis manager
+        session_key = f"{tenant_id}|{user_id}|{device_id}|{session_id}"
+        redis_manager.revoke_all_tasks(session_key)
+        
+        manager.disconnect(tenant_id, user_id, session_id, device_id)
 
 
 async def process_websocket_message(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, session_id: str, device_id: str = None):
-    """Process individual WebSocket messages with device support"""
+    """Process individual WebSocket messages with session-specific isolation"""
     if "type" in data:
         message_type = data.get("type")
     else:
         message_type = "unknown"
         print(f"❓ Unknown message type received: {data}")
     
-    # Use device-specific key for audio buffers
-    key = f"{tenant_id}_{user_id}_{device_id}" if device_id else f"{tenant_id}_{user_id}"
+    # Use session-specific key for complete isolation
+    key = f"{tenant_id}_{user_id}_{device_id}_{session_id}"
 
     if message_type == "ping":
-        await websocket.send_json({"type": "pong", "timestamp": time.time(), "device_id": device_id})
+        await websocket.send_json({
+            "type": "pong", 
+            "timestamp": time.time(), 
+            "session_id": session_id,
+            "device_id": device_id
+        })
 
-    elif message_type == "audio_chunk":  # NEW MESSAGE TYPE
+    elif message_type == "audio_chunk":
         await handle_audio_chunk(websocket, tenant_id, user_id, data, key, session_id, device_id)
 
     elif message_type == "continuous_audio_stream":
@@ -261,12 +266,19 @@ async def process_websocket_message(websocket: WebSocket, tenant_id: str, user_i
         await websocket.send_json({
             "type": "error",
             "message": f"Unknown message type: {message_type}",
+            "session_id": session_id,
             "device_id": device_id
         })
 
+
+
+async def handle_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
+  print(data)
+
+
 # Update all handler functions to include device_id parameter
 async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
-    """Handle continuous audio stream with device-specific buffer management"""
+    """Handle continuous audio stream with session-specific buffer management"""
     audio_chunk_base64 = data.get("audio")
     if not audio_chunk_base64:
         return
@@ -283,9 +295,6 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
             # Get buffer contents and clear it
             buffer_data = audio_buffer_manager.get_and_clear_buffer(key)
             
-
-            
-            # Submit to Celery for processing only if there is speech detected
             # Apply VAD to detect speech segments
             from backend.workers.stt_tasks import get_speech_timestamps
             audio_data = bytes_to_numpy_audio(audio_bytes)
@@ -301,55 +310,61 @@ async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, u
                 vad_model, 
                 sampling_rate=sample_rate,
                 threshold=0.2,
-                min_speech_duration_ms=200,  # Minimum 0.5s speech
-                min_silence_duration_ms=100,  # 0.3s silence to separate utterances
-                speech_pad_ms=50  # Add padding around speech
+                min_speech_duration_ms=200,
+                min_silence_duration_ms=100,
+                speech_pad_ms=50
             )
-        #    convert tensor back to bytes
-            audio_bytes = audio_tensor.numpy().astype(np.float32).tobytes()
 
             int16_audio = np.clip(audio_tensor.numpy(), -1.0, 1.0)
             int16_audio = (int16_audio * 32767).astype(np.int16)
             audio_bytes = int16_audio.tobytes()
+            
             from backend.workers.stt_tasks import process_continuous_audio_task
             process_continuous_audio_task.delay(
                 speech_bytes=audio_bytes,
                 speech_timestamps=speech_timestamps,
                 user_id=user_id,
                 tenant_id=tenant_id,
-                device_id=device_id,  # Make sure this is included
+                device_id=device_id,
+                session_id=session_id,  # Pass session_id for complete isolation
                 buffer_key=key,
                 tts_language=data.get("tts_language", "en"),
                 voice=data.get("voice", "Fritz-PlayAI"),
                 auto_respond=data.get("auto_respond", True),
                 chunk_id=data.get("chunk_id", str(uuid4())),
-                use_rag=data.get("rag", True) # Enable RAG processing if not specified
+                use_rag=data.get("rag", True)
             )
     
     except Exception as e:
         await websocket.send_json({
             "type": "error",
-            "message": f"Error processing continuous audio: {str(e)}"
+            "message": f"Error processing continuous audio: {str(e)}",
+            "session_id": session_id,
+            "device_id": device_id
         })
 
 async def handle_start_continuous_conversation(websocket: WebSocket, tenant_id: str, user_id: str, key: str, session_id: str, device_id: str = None):
-    """Initialize continuous conversation mode"""
+    """Initialize continuous conversation mode with session isolation"""
     audio_buffer_manager.clear_buffer(key)
     await websocket.send_json({
         "type": "continuous_conversation_started",
-        "message": "Ready for continuous conversation"
+        "message": "Ready for continuous conversation",
+        "session_id": session_id,
+        "device_id": device_id
     })
 
 async def handle_stop_continuous_conversation(websocket: WebSocket, tenant_id: str, user_id: str, key: str, session_id: str, device_id: str = None):
-    """Stop continuous conversation mode"""
+    """Stop continuous conversation mode with session cleanup"""
     audio_buffer_manager.clear_buffer(key)
     await websocket.send_json({
         "type": "continuous_conversation_stopped",
-        "message": "Continuous conversation stopped"
+        "message": "Continuous conversation stopped",
+        "session_id": session_id,
+        "device_id": device_id
     })
 
 async def handle_query(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, session_id: str, device_id: str = None):
-    """Handle regular query submission"""
+    """Handle regular query submission with session tracking"""
     from backend.workers.tasks import process_query_task
     
     query_id = str(uuid4())
@@ -358,29 +373,34 @@ async def handle_query(websocket: WebSocket, tenant_id: str, user_id: str, data:
     if not query:
         await websocket.send_json({
             "type": "error",
-            "message": "Empty query received"
+            "message": "Empty query received",
+            "session_id": session_id,
+            "device_id": device_id
         })
         return
     
-    # Submit to Celery
+    # Submit to Celery with session information
     process_query_task.delay(
         query_id=query_id,
         query=query,
         tenant_id=tenant_id,
         user_id=user_id,
+        session_id=session_id,
+        device_id=device_id,
         max_tokens=data.get("max_tokens", 500),
-        temperature=data.get("temperature", 0.7),
-        session_id=data.get("session_id")
+        temperature=data.get("temperature", 0.7)
     )
     
     await websocket.send_json({
         "type": "query_submitted",
         "query_id": query_id,
+        "session_id": session_id,
+        "device_id": device_id,
         "message": "Query received and being processed..."
     })
 
 async def handle_query_with_tts(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, session_id: str, device_id: str = None):
-    """Handle query with TTS"""
+    """Handle query with TTS with session tracking"""
     from backend.workers.tasks import process_query_with_tts_task
     
     query_id = str(uuid4())
@@ -390,20 +410,23 @@ async def handle_query_with_tts(websocket: WebSocket, tenant_id: str, user_id: s
     if not query:
         await websocket.send_json({
             "type": "error",
-            "message": "Empty query received"
+            "message": "Empty query received",
+            "session_id": session_id,
+            "device_id": device_id
         })
         return
     
-    # Submit to Celery
+    # Submit to Celery with session information
     process_query_with_tts_task.delay(
         query_id=query_id,
         tts_task_id=tts_task_id,
         query=query,
         tenant_id=tenant_id,
         user_id=user_id,
+        session_id=session_id,
+        device_id=device_id,
         max_tokens=data.get("max_tokens", 500),
         temperature=data.get("temperature", 0.7),
-        session_id=data.get("session_id", None),
         language=data.get("language", "en"),
         voice=data.get("voice", ""),
         stream_audio=data.get("stream_audio", True)
@@ -413,17 +436,14 @@ async def handle_query_with_tts(websocket: WebSocket, tenant_id: str, user_id: s
         "type": "query_with_tts_submitted",
         "query_id": query_id,
         "tts_task_id": tts_task_id,
+        "session_id": session_id,
+        "device_id": device_id,
         "message": "Query with TTS received and being processed..."
     })
 
-async def handle_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
-  print(data)
-
-
-
 # NEW HANDLER FUNCTION
 async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
-    """Handle tiny audio chunks - accumulate and process with VAD, less aggressive processing"""
+    """Handle tiny audio chunks with session-specific processing"""
     audio_chunk_base64 = data.get("audio")
     if not audio_chunk_base64:
         return
@@ -431,12 +451,12 @@ async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str,
     try:
         audio_bytes = base64.b64decode(audio_chunk_base64)
         
-        # Just append to buffer - no VAD in buffer manager
+        # Just append to buffer - session-specific buffer management
         result = audio_buffer_manager.append_audio(key, audio_bytes)
         current_buffer_size = result.get("buffer_size", 0)
         
         # Be less aggressive - wait for more audio before processing
-        min_processing_threshold = 32000  # 2 seconds at 16kHz (was 1 second)
+        min_processing_threshold = 32000  # 2 seconds at 16kHz
         
         if current_buffer_size >= min_processing_threshold:
             # Get buffer for VAD processing
@@ -449,157 +469,105 @@ async def handle_audio_chunk(websocket: WebSocket, tenant_id: str, user_id: str,
                     buffer_tensor = torch.from_numpy(buffer_audio).float()
                     buffer_tensor = torch.clamp(buffer_tensor, -1.0, 1.0)
                     
-                    # Apply VAD to detect speech segments - more lenient settings
+                    # Apply VAD to detect speech segments
                     from backend.workers.stt_tasks import get_speech_timestamps
                     speech_timestamps = get_speech_timestamps(
                         buffer_tensor, 
                         vad_model, 
                         sampling_rate=sample_rate,
-                        threshold=0.2,  # Higher threshold - be more sure it's speech
-                        min_speech_duration_ms=500,  # Longer minimum speech duration
-                        min_silence_duration_ms=200,  # Longer silence before considering speech ended
+                        threshold=0.2,
+                        min_speech_duration_ms=500,
+                        min_silence_duration_ms=200,
                         speech_pad_ms=100
                     )
                     
-                    # Check if we have a clear end of speech (silence after speech)
+                    # Check if we have a clear end of speech
                     has_clear_speech_end = False
                     if speech_timestamps:
                         last_segment = speech_timestamps[-1]
                         last_speech_end = last_segment['end']
                         buffer_end = len(buffer_tensor)
-                        silence_after_speech = (buffer_end - last_speech_end) / sample_rate  # seconds of silence
-                        
-                        # Consider speech "ended" if we have more than 1.5 seconds of silence after last speech
+                        silence_after_speech = (buffer_end - last_speech_end) / sample_rate
                         has_clear_speech_end = silence_after_speech > 1.5
                     
-                    # Only process if we have multiple segments OR clear end of speech OR buffer is very large
+                    # Determine if we should process
                     should_process = False
                     process_all_segments = False
                     
                     if speech_timestamps and len(speech_timestamps) > 1 and has_clear_speech_end:
-                        # Multiple segments with clear speech end - process all
                         should_process = True
                         process_all_segments = True
-                        
                     elif speech_timestamps and len(speech_timestamps) >= 1 and has_clear_speech_end:
-                        # Single segment but clear speech end - process it
                         should_process = True
                         process_all_segments = True
-                        
                     elif current_buffer_size >= 160000:  # 10 seconds - force processing
                         should_process = True
                         process_all_segments = True
                         
-                    if should_process:
-                        if process_all_segments:
-                            # Process entire buffer - complete utterance
-                            int16_audio = np.clip(buffer_tensor.numpy(), -1.0, 1.0)
-                            int16_audio = (int16_audio * 32767).astype(np.int16)
-                            audio_bytes_processed = int16_audio.tobytes()
-                            
-                            # Clear the buffer since we're processing everything
-                            audio_buffer_manager.clear_buffer(key)
-                            
-                            # Send processed audio for transcription
-                            from backend.workers.stt_tasks import process_continuous_audio_task
-                            chunk_id = data.get("chunk_id", str(uuid4()))
-                            
-                            process_continuous_audio_task.delay(
-                                speech_bytes=audio_bytes_processed,
-                                speech_timestamps=speech_timestamps,
-                                user_id=user_id,
-                                tenant_id=tenant_id,
-                                device_id=device_id,
-                                buffer_key=key,
-                                tts_language=data.get("tts_language", "en"),
-                                voice=data.get("voice", "Fritz-PlayAI"),
-                                auto_respond=data.get("auto_respond", True),
-                                chunk_id=chunk_id,
-                                use_rag=data.get("rag", True)
-                            )
-                            
-                            logger.info(f"✅ Complete utterance processed: {len(speech_timestamps)} segments, chunk_id: {chunk_id}")
-                            
-                            # Send acknowledgment back to client
-                            await websocket.send_json({
-                                "type": "audio_chunk_processed",
-                                "chunk_id": chunk_id,
-                                "reason": "complete_utterance_processed",
-                                "speech_segments_processed": len(speech_timestamps),
-                                "speech_segments_remaining": 0,
-                                "buffer_duration_ms": len(buffer_tensor) * 1000 / sample_rate,
-                                "device_id": device_id
-                            })
+                    if should_process and process_all_segments:
+                        # Process entire buffer - complete utterance
+                        int16_audio = np.clip(buffer_tensor.numpy(), -1.0, 1.0)
+                        int16_audio = (int16_audio * 32767).astype(np.int16)
+                        audio_bytes_processed = int16_audio.tobytes()
                         
-                        else:
-                            # Process all but last segment (old behavior - rarely used now)
-                            segments_to_process = speech_timestamps[:-1]
-                            
-                            if segments_to_process:
-                                last_processed_sample = segments_to_process[-1]['end']
-                                audio_to_process = buffer_tensor[:last_processed_sample]
-                                
-                                int16_audio = np.clip(audio_to_process.numpy(), -1.0, 1.0)
-                                int16_audio = (int16_audio * 32767).astype(np.int16)
-                                audio_bytes_processed = int16_audio.tobytes()
-                                
-                                # Keep remaining audio
-                                remaining_audio = buffer_tensor[last_processed_sample:]
-                                remaining_int16 = np.clip(remaining_audio.numpy(), -1.0, 1.0)
-                                remaining_int16 = (remaining_int16 * 32767).astype(np.int16)
-                                remaining_bytes = remaining_int16.tobytes()
-                                
-                                audio_buffer_manager.clear_buffer(key)
-                                audio_buffer_manager.append_audio(key, remaining_bytes)
-                                
-                                from backend.workers.stt_tasks import process_continuous_audio_task
-                                chunk_id = data.get("chunk_id", str(uuid4()))
-                                
-                                process_continuous_audio_task.delay(
-                                    speech_bytes=audio_bytes_processed,
-                                    speech_timestamps=segments_to_process,
-                                    user_id=user_id,
-                                    tenant_id=tenant_id,
-                                    device_id=device_id,
-                                    buffer_key=key,
-                                    tts_language=data.get("tts_language", "en"),
-                                    voice=data.get("voice", "Fritz-PlayAI"),
-                                    auto_respond=data.get("auto_respond", True),
-                                    chunk_id=chunk_id,
-                                    use_rag=data.get("rag", True)
-                                )
-                                
-                                logger.info(f"✅ Partial processing: {len(segments_to_process)} segments processed, 1 segment kept, chunk_id: {chunk_id}")
+                        # Clear the session-specific buffer
+                        audio_buffer_manager.clear_buffer(key)
+                        
+                        # Send processed audio for transcription with session info
+                        from backend.workers.stt_tasks import process_continuous_audio_task
+                        chunk_id = data.get("chunk_id", str(uuid4()))
+                        
+                        process_continuous_audio_task.delay(
+                            speech_bytes=audio_bytes_processed,
+                            speech_timestamps=speech_timestamps,
+                            user_id=user_id,
+                            tenant_id=tenant_id,
+                            device_id=device_id,
+                            session_id=session_id,  # Complete session isolation
+                            buffer_key=key,
+                            tts_language=data.get("tts_language", "en"),
+                            voice=data.get("voice", "Fritz-PlayAI"),
+                            auto_respond=data.get("auto_respond", True),
+                            chunk_id=chunk_id,
+                            use_rag=data.get("rag", True)
+                        )
+                        
+                        logger.info(f"✅ Complete utterance processed for session {session_id}: {len(speech_timestamps)} segments, chunk_id: {chunk_id}")
+                        
+                        # Send acknowledgment back to client with session info
+                        await websocket.send_json({
+                            "type": "audio_chunk_processed",
+                            "chunk_id": chunk_id,
+                            "session_id": session_id,
+                            "device_id": device_id,
+                            "reason": "complete_utterance_processed",
+                            "speech_segments_processed": len(speech_timestamps),
+                            "speech_segments_remaining": 0,
+                            "buffer_duration_ms": len(buffer_tensor) * 1000 / sample_rate
+                        })
                     
                     # If buffer is getting extremely large without speech, trim it
                     elif current_buffer_size > 320000:  # 20 seconds
                         audio_buffer_manager.trim_buffer_to_last_n_bytes(key, 32000)  # Keep last 2 seconds
-                        logger.debug(f"🔇 Trimmed very large non-speech buffer for {key}")
+                        logger.debug(f"🔇 Trimmed very large non-speech buffer for session {session_id}")
         
         # Send status update less frequently
         if current_buffer_size > 0 and current_buffer_size % 64000 == 0:  # Every ~4 seconds
             await websocket.send_json({
                 "type": "audio_chunk_accumulating",
-                "buffer_duration_ms": current_buffer_size * 1000 / (sample_rate * 2),  # 2 bytes per sample
-                "device_id": device_id
+                "session_id": session_id,
+                "device_id": device_id,
+                "buffer_duration_ms": current_buffer_size * 1000 / (sample_rate * 2)
             })
     
     except Exception as e:
-        logger.error(f"❌ Error processing audio chunk: {e}")
+        logger.error(f"❌ Error processing audio chunk for session {session_id}: {e}")
         await websocket.send_json({
             "type": "error",
             "message": f"Error processing audio chunk: {str(e)}",
+            "session_id": session_id,
             "device_id": device_id
         })
-
-
-
-
-
-
-
-
-
 
 async def handle_audio_stream_end(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
     """Handle end of audio stream"""

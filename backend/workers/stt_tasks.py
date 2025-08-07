@@ -1,5 +1,5 @@
 """
-Speech-to-Text (STT) related Celery tasks
+Speech-to-Text (STT) related Celery tasks with session support
 """
 from backend.workers.celery_worker import celery_app
 from backend.workers.utilities import (
@@ -17,9 +17,7 @@ from silero_vad import get_speech_timestamps, collect_chunks
 from better_profanity import profanity
 from backend.workers.utilities import partial_censor
 
-
 profanity.load_censor_words()
-
 
 def bytes_to_numpy_audio(audio_bytes: bytes) -> np.ndarray:
     """Convert audio bytes to numpy array - handles multiple formats"""
@@ -54,15 +52,11 @@ def bytes_to_numpy_audio(audio_bytes: bytes) -> np.ndarray:
         print(f"❌ Error converting audio bytes: {e}")
         return None
 
-
-
 def send_transcription_result_via_websocket(tenant_id: str, user_id: str, chunk_id: str, 
                                           transcript: str, confidence: float, detected_language: str,
-                                          segments: list, processing_time: float):
-    """Send transcription result via Redis for WebSocket delivery"""
-    if not redis_client:
-        return
-        
+                                          segments: list, processing_time: float,
+                                          device_id: str = None, session_id: str = None):
+    """Send transcription result via Redis for WebSocket delivery with session support"""
     try:
         message = {
             "type": "transcription_result",
@@ -75,20 +69,21 @@ def send_transcription_result_via_websocket(tenant_id: str, user_id: str, chunk_
             "timestamp": datetime.utcnow().isoformat()
         }
         
-        # Publish message to Redis channel
-        channel = f"ws:{tenant_id}:{user_id}"
-        redis_client.publish(channel, json.dumps(message))
+        # Use Redis manager for session-aware publishing
+        from backend.redis_manager import redis_manager
+        if device_id and session_id:
+            redis_manager.publish_to_session(tenant_id, user_id, device_id, session_id, message)
+        else:
+            redis_manager.publish_to_user_sessions(tenant_id, user_id, message)
+        
         print(f"✅ Transcription sent via Redis: {transcript[:30]}...")
         
     except Exception as e:
         print(f"❌ Error sending transcription via Redis: {e}")
 
-
-def send_transcription_error_via_websocket(tenant_id: str, user_id: str, chunk_id: str, error: str):
-    """Send transcription error via Redis for WebSocket delivery"""
-    if not redis_client:
-        return
-        
+def send_transcription_error_via_websocket(tenant_id: str, user_id: str, chunk_id: str, error: str,
+                                         device_id: str = None, session_id: str = None):
+    """Send transcription error via Redis for WebSocket delivery with session support"""
     try:
         message = {
             "type": "transcription_error",
@@ -97,15 +92,19 @@ def send_transcription_error_via_websocket(tenant_id: str, user_id: str, chunk_i
             "timestamp": datetime.utcnow().isoformat()
         }
         
-        channel = f"ws:{tenant_id}:{user_id}"
-        redis_client.publish(channel, json.dumps(message))
+        # Use Redis manager for session-aware publishing
+        from backend.redis_manager import redis_manager
+        if device_id and session_id:
+            redis_manager.publish_to_session(tenant_id, user_id, device_id, session_id, message)
+        else:
+            redis_manager.publish_to_user_sessions(tenant_id, user_id, message)
         
     except Exception as e:
         print(f"❌ Error sending transcription error via Redis: {e}")
 
-
 @celery_app.task(name='transcribe_chunk', bind=True)
-def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tenant_id: str = None):
+def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tenant_id: str = None,
+                    device_id: str = None, session_id: str = None):
     """
     Transcribe audio chunk using direct numpy array processing (no temp files)
     This is called directly from WebSocket audio streams
@@ -189,7 +188,9 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
                 confidence=confidence,
                 detected_language=detected_language,
                 segments=segment_details,
-                processing_time=transcription_duration
+                processing_time=transcription_duration,
+                device_id=device_id,
+                session_id=session_id
             )
 
         return {
@@ -218,7 +219,9 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
                 tenant_id=tenant_id,
                 user_id=user_id,
                 chunk_id=chunk_id,
-                error=str(e)
+                error=str(e),
+                device_id=device_id,
+                session_id=session_id
             )
         
         return {
@@ -229,17 +232,15 @@ def transcribe_chunk(self, audio_bytes: bytes, user_id: str, chunk_id: str, tena
             "worker": self.request.hostname
         }
 
-
 @celery_app.task(name='streaming_transcribe', bind=True)
 def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: str, 
-                            tenant_id: str = None, is_final: bool = False):
+                            tenant_id: str = None, device_id: str = None, session_id: str = None,
+                            is_final: bool = False):
     """
     Streaming transcription - provides intermediate results
     """
     try:
         audio_data = bytes_to_numpy_audio(audio_bytes)
-        # store the audio data in a temporary file if needed
-
 
         # Use Whisper with streaming mode
         segments, info = model.transcribe(
@@ -274,9 +275,13 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
             "processing_time": time.time() - start_time
         }
         
-        # Send via Redis for immediate WebSocket delivery
-        if redis_client and tenant_id:
-            redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(result))
+        # Send via Redis for immediate WebSocket delivery with session support
+        from backend.redis_manager import redis_manager
+        if tenant_id:
+            if device_id and session_id:
+                redis_manager.publish_to_session(tenant_id, user_id, device_id, session_id, result)
+            else:
+                redis_manager.publish_to_user_sessions(tenant_id, user_id, result)
         
         # If final and should respond, trigger response generation
         if is_final:
@@ -287,6 +292,8 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
                 query=transcript,
                 tenant_id=tenant_id,
                 user_id=user_id,
+                device_id=device_id,
+                session_id=session_id,
                 language="en",
                 voice="Fritz-PlayAI",  # Default voice
                 stream_audio=True
@@ -302,37 +309,34 @@ def streaming_transcribe_task(self, audio_bytes: bytes, user_id: str, chunk_id: 
             "error": str(e)
         }
 
-
 @celery_app.task(name='process_continuous_audio', bind=True)
-def process_continuous_audio_task(self,speech_bytes, speech_timestamps, user_id: str, tenant_id: str, 
-                                 buffer_key: str, device_id: str, tts_language: str = "en", 
-                                 voice: str = "Fritz-PlayAI",chunk_id=None, auto_respond: bool = True, use_rag: bool = True):
+def process_continuous_audio_task(self, speech_bytes, speech_timestamps, user_id: str, tenant_id: str, 
+                                 buffer_key: str, device_id: str = None, session_id: str = None,
+                                 tts_language: str = "en", voice: str = "Fritz-PlayAI", chunk_id=None, 
+                                 auto_respond: bool = True, use_rag: bool = True):
     """
     Process continuous audio stream with server-side VAD
     Detects speech segments and triggers STT+RAG+TTS pipeline
     """
-    print(f"🔄 [CONTINUOUS] Processing audio buffer for user {user_id}")
+    print(f"🔄 [CONTINUOUS] Processing audio buffer for user {user_id}, session {session_id}")
     
     try: 
         print(f"   🔍 Found {len(speech_timestamps)} speech segments")
         if not speech_timestamps:
-            return { "type": "status",
-                "status": "no_speech"}
+            return {"type": "status", "status": "no_speech"}
         
-
         if not chunk_id:   
             # Create unique chunk ID for this segment
             chunk_id = f"{user_id}_{int(time.time() * 1000)}"
             
         segment_result = process_speech_segment(
-            speech_bytes, user_id, chunk_id, tenant_id, device_id,
+            speech_bytes, user_id, chunk_id, tenant_id, device_id, session_id,
             tts_language, voice, auto_respond, use_rag=use_rag
         )
         
-        
         return {
             "status": "success",
-            "segments_processed": len(segment_result),
+            "segments_processed": len(speech_timestamps),
             "chunk_id": chunk_id,
             "results": segment_result
         }
@@ -341,14 +345,14 @@ def process_continuous_audio_task(self,speech_bytes, speech_timestamps, user_id:
         print(f"❌ [CONTINUOUS] Error: {e}")
         return {"status": "error", "error": str(e)}
 
-
 def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str, 
-                         tenant_id: str, device_id: str, tts_language: str, voice: str, auto_respond: bool, use_rag: bool = True):
+                         tenant_id: str, device_id: str, session_id: str, tts_language: str, voice: str, 
+                         auto_respond: bool, use_rag: bool = True):
     """
-    Process a single detected speech segment through STT+RAG+TTS
+    Process a single detected speech segment through STT+RAG+TTS with session support
     """
     try:
-        print(f"🎯 [SPEECH] Processing segment {chunk_id}")
+        print(f"🎯 [SPEECH] Processing segment {chunk_id} for session {session_id}")
         
         # Step 1: STT
         audio_data = bytes_to_numpy_audio(speech_bytes)
@@ -364,8 +368,8 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
         # Extract transcript
         transcript_parts = []
         for segment in segments:
-            segment = partial_censor(segment.text.strip())
-            transcript_parts.append(segment.strip())
+            segment_text = partial_censor(segment.text.strip())
+            transcript_parts.append(segment_text)
         
         transcript = " ".join(transcript_parts).strip()
         
@@ -377,7 +381,7 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
 
         print(f"   📝 Transcript: '{transcript}'")
         
-        # Send STT result immediately
+        # Send STT result immediately with session support
         stt_result = {
             "type": "speech_detected",
             "transcript": transcript,
@@ -387,9 +391,12 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
             "duration": len(audio_data) / sample_rate
         }
         
-        # Send via Redis for immediate WebSocket delivery
-        if redis_client:
-            redis_client.publish(f"ws:{tenant_id}:{user_id}", json.dumps(stt_result))
+        # Send via Redis for immediate WebSocket delivery with session support
+        from backend.redis_manager import redis_manager
+        if device_id and session_id:
+            redis_manager.publish_to_session(tenant_id, user_id, device_id, session_id, stt_result)
+        else:
+            redis_manager.publish_to_user_sessions(tenant_id, user_id, stt_result)
         
         # Step 2: Check if we should respond
         if auto_respond:
@@ -399,7 +406,7 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
             response_id = str(uuid4())
             tts_task_id = str(uuid4())
             
-            # Trigger RAG + TTS response
+            # Trigger RAG + TTS response with session information
             from backend.workers.query_tasks import process_query_with_tts_task
             process_query_with_tts_task.delay(
                 chunk_id=chunk_id,
@@ -408,6 +415,8 @@ def process_speech_segment(speech_bytes: bytes, user_id: str, chunk_id: str,
                 query=transcript,
                 tenant_id=tenant_id,
                 user_id=user_id,
+                device_id=device_id,
+                session_id=session_id,
                 language=tts_language,
                 voice=voice,
                 stream_audio=True,

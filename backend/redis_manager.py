@@ -1,6 +1,6 @@
 import redis
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime
 import logging
 import asyncio
@@ -103,80 +103,226 @@ class RedisManager:
             self._handle_failure()
             return await self._local_fallback(channel, message)
 
+    def _create_session_key(self, tenant_id: str, user_id: str, device_id: str, session_id: str) -> str:
+        """Create standardized session key for task tracking"""
+        return f"{tenant_id}|{user_id}|{device_id}|{session_id}"
 
     def register_task(self, session_key: str, task_id: str):
-        """Track task_id for a given user (tenant_user_key)"""
+        """Track task_id for a given session (tenant|user|device|session)"""
         try:
             self.client.sadd(f"tasks:{session_key}", task_id)
-            self.client.expire(f"tasks:{session_key}", 3600)  # Optional: Auto-expire in 1 hour
-            logger.debug(f"📌 Task {task_id} registered for {session_key}")
+            self.client.expire(f"tasks:{session_key}", 3600)  # Auto-expire in 1 hour
+            logger.debug(f"📌 Task {task_id} registered for session {session_key}")
         except Exception as e:
-            logger.error(f"❌ Failed to register task {task_id} for {session_key}: {e}")
+            logger.error(f"❌ Failed to register task {task_id} for session {session_key}: {e}")
 
-    def get_user_tasks(self, session_key: str):
-        """Return all task_ids for a user"""
+    def register_task_for_session(self, tenant_id: str, user_id: str, device_id: str, session_id: str, task_id: str):
+        """Register task with full session hierarchy"""
+        session_key = self._create_session_key(tenant_id, user_id, device_id, session_id)
+        self.register_task(session_key, task_id)
+        
+        # Also track at device level for broader cleanup if needed
+        device_key = f"{tenant_id}|{user_id}|{device_id}"
+        try:
+            self.client.sadd(f"device_tasks:{device_key}", task_id)
+            self.client.expire(f"device_tasks:{device_key}", 3600)
+        except Exception as e:
+            logger.error(f"❌ Failed to register device task {task_id}: {e}")
+
+    def get_session_tasks(self, session_key: str):
+        """Return all task_ids for a session"""
         try:
             return self.client.smembers(f"tasks:{session_key}")
         except Exception as e:
-            logger.error(f"❌ Failed to get tasks for {session_key}: {e}")
+            logger.error(f"❌ Failed to get tasks for session {session_key}: {e}")
             return set()
 
-    def clear_user_tasks(self, session_key: str):
-        """Clear task tracking for a user"""
+    def get_device_tasks(self, tenant_id: str, user_id: str, device_id: str):
+        """Return all task_ids for a device"""
+        device_key = f"{tenant_id}|{user_id}|{device_id}"
+        try:
+            return self.client.smembers(f"device_tasks:{device_key}")
+        except Exception as e:
+            logger.error(f"❌ Failed to get device tasks for {device_key}: {e}")
+            return set()
+
+    def clear_session_tasks(self, session_key: str):
+        """Clear task tracking for a session"""
         try:
             self.client.delete(f"tasks:{session_key}")
+            logger.debug(f"🧹 Cleared tasks for session {session_key}")
         except Exception as e:
-            logger.error(f"❌ Failed to clear tasks for {session_key}: {e}")
+            logger.error(f"❌ Failed to clear tasks for session {session_key}: {e}")
+
+    def clear_device_tasks(self, tenant_id: str, user_id: str, device_id: str):
+        """Clear all task tracking for a device"""
+        device_key = f"{tenant_id}|{user_id}|{device_id}"
+        try:
+            self.client.delete(f"device_tasks:{device_key}")
+            logger.debug(f"🧹 Cleared device tasks for {device_key}")
+        except Exception as e:
+            logger.error(f"❌ Failed to clear device tasks for {device_key}: {e}")
 
     def revoke_all_tasks(self, session_key: str):
-        """Revoke all tracked tasks for a user"""
+        """Revoke all tracked tasks for a session"""
         try:
-            task_ids = self.get_user_tasks(session_key)
+            task_ids = self.get_session_tasks(session_key)
             control = celery_app.control
             for task_id in task_ids:
                 control.revoke(task_id, terminate=True)
-                logger.info(f"🚫 Revoked task {task_id} for {session_key}")
-            self.clear_user_tasks(session_key)
+                logger.info(f"🚫 Revoked task {task_id} for session {session_key}")
+            self.clear_session_tasks(session_key)
         except Exception as e:
-            logger.error(f"❌ Failed to revoke tasks for {session_key}: {e}")
+            logger.error(f"❌ Failed to revoke tasks for session {session_key}: {e}")
 
-    def publish_to_user_device(self, tenant_id: str, user_id: str, message: dict, device_id: str = None):
-        """Send message to specific device or all user devices"""
-        message['tenant_id'] = tenant_id
-        message['user_id'] = user_id
-        if device_id:
-            message['device_id'] = device_id
-            channel = f"voicebot_responses_{tenant_id}_{user_id}_{device_id}"
-        else:
-            channel = f"voicebot_responses_{tenant_id}_{user_id}"
-        
-        self.publish(channel, json.dumps(message))
-    
-    def revoke_device_tasks(self, session_id: str, device_id: str):
-        """Revoke tasks for a specific device"""
+    def revoke_session_tasks(self, tenant_id: str, user_id: str, device_id: str, session_id: str):
+        """Revoke all tasks for a specific session"""
+        session_key = self._create_session_key(tenant_id, user_id, device_id, session_id)
+        self.revoke_all_tasks(session_key)
+
+    def revoke_device_tasks(self, tenant_id: str, user_id: str, device_id: str):
+        """Revoke all tasks for a specific device (all sessions)"""
         try:
-            # Get all active tasks for this session/device
-            active_tasks = celery_app.control.inspect().active()
+            # Get all tasks for this device
+            task_ids = self.get_device_tasks(tenant_id, user_id, device_id)
+            control = celery_app.control
             
-            for worker, tasks in active_tasks.items():
-                for task in tasks:
-                    # Check if task belongs to this session and device
-                    if (task.get('kwargs', {}).get('session_id') == session_id and 
-                        task.get('kwargs', {}).get('device_id') == device_id):
-                        celery_app.control.revoke(task['id'], terminate=True)
-                        logger.info(f"🚫 Revoked task {task['id']} for device {device_id}")
-                        
+            for task_id in task_ids:
+                control.revoke(task_id, terminate=True)
+                logger.info(f"🚫 Revoked device task {task_id} for {tenant_id}|{user_id}|{device_id}")
+            
+            # Clear device task tracking
+            self.clear_device_tasks(tenant_id, user_id, device_id)
+            
+            # Also clear any session-specific tasks for this device
+            device_sessions = manager.get_device_sessions(tenant_id, user_id, device_id)
+            for session_id in device_sessions:
+                session_key = self._create_session_key(tenant_id, user_id, device_id, session_id)
+                self.clear_session_tasks(session_key)
+                
         except Exception as e:
             logger.error(f"❌ Error revoking device tasks: {e}")
 
+    def revoke_user_tasks(self, tenant_id: str, user_id: str):
+        """Revoke all tasks for a user (all devices and sessions)"""
+        try:
+            # Get all devices for this user
+            user_devices = manager.get_user_devices(tenant_id, user_id)
+            
+            for device_id, sessions in user_devices.items():
+                # Revoke device-level tasks
+                self.revoke_device_tasks(tenant_id, user_id, device_id)
+                
+                # Revoke session-level tasks
+                for session_id in sessions:
+                    self.revoke_session_tasks(tenant_id, user_id, device_id, session_id)
+                    
+        except Exception as e:
+            logger.error(f"❌ Error revoking user tasks: {e}")
 
+    def publish_to_session(self, tenant_id: str, user_id: str, device_id: str, session_id: str, message: dict):
+        """Send message to a specific session"""
+        message.update({
+            'tenant_id': tenant_id,
+            'user_id': user_id,
+            'device_id': device_id,
+            'session_id': session_id
+        })
+        
+        channel = f"ws:{tenant_id}:{user_id}:{device_id}:{session_id}"
+        self.publish(channel, json.dumps(message))
 
+    def publish_to_device_sessions(self, tenant_id: str, user_id: str, device_id: str, message: dict):
+        """Send message to all sessions on a device"""
+        message.update({
+            'tenant_id': tenant_id,
+            'user_id': user_id,
+            'device_id': device_id
+        })
+        
+        # Get all sessions for this device
+        device_sessions = manager.get_device_sessions(tenant_id, user_id, device_id)
+        for session_id in device_sessions:
+            channel = f"ws:{tenant_id}:{user_id}:{device_id}:{session_id}"
+            session_message = message.copy()
+            session_message['session_id'] = session_id
+            self.publish(channel, json.dumps(session_message))
 
+    def publish_to_user_sessions(self, tenant_id: str, user_id: str, message: dict):
+        """Send message to all sessions for a user (all devices)"""
+        message.update({
+            'tenant_id': tenant_id,
+            'user_id': user_id
+        })
+        
+        # Get all devices and sessions for this user
+        user_devices = manager.get_user_devices(tenant_id, user_id)
+        for device_id, sessions in user_devices.items():
+            for session_id in sessions:
+                channel = f"ws:{tenant_id}:{user_id}:{device_id}:{session_id}"
+                session_message = message.copy()
+                session_message.update({
+                    'device_id': device_id,
+                    'session_id': session_id
+                })
+                self.publish(channel, json.dumps(session_message))
 
-# Improved Redis listener with health monitoring and error recovery
+    def publish_to_tenant_sessions(self, tenant_id: str, message: dict):
+        """Send message to all sessions in a tenant"""
+        message['tenant_id'] = tenant_id
+        
+        # Use WebSocket manager to get all tenant connections
+        connections = manager.get_connection_hierarchy_stats()
+        
+        # For each tenant connection, publish to all sessions
+        if tenant_id in manager.tenant_users:
+            for user_id in manager.tenant_users[tenant_id]:
+                self.publish_to_user_sessions(tenant_id, user_id, message.copy())
 
+    # Legacy methods for backward compatibility
+    def publish_to_user_device(self, tenant_id: str, user_id: str, message: dict, device_id: str = None, session_id: str = None):
+        """Legacy method - updated to support session routing"""
+        if session_id and device_id:
+            # Send to specific session
+            self.publish_to_session(tenant_id, user_id, device_id, session_id, message)
+        elif device_id:
+            # Send to all sessions on device
+            self.publish_to_device_sessions(tenant_id, user_id, device_id, message)
+        else:
+            # Send to all user sessions
+            self.publish_to_user_sessions(tenant_id, user_id, message)
+
+    def get_task_stats(self) -> Dict[str, Any]:
+        """Get statistics about tracked tasks"""
+        try:
+            # Get all task keys
+            session_task_keys = self.client.keys("tasks:*")
+            device_task_keys = self.client.keys("device_tasks:*")
+            
+            session_task_count = 0
+            device_task_count = 0
+            
+            for key in session_task_keys:
+                session_task_count += self.client.scard(key)
+            
+            for key in device_task_keys:
+                device_task_count += self.client.scard(key)
+            
+            return {
+                "session_task_keys": len(session_task_keys),
+                "device_task_keys": len(device_task_keys),
+                "total_session_tasks": session_task_count,
+                "total_device_tasks": device_task_count,
+                "redis_healthy": self.is_healthy
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting task stats: {e}")
+            return {"error": str(e)}
+
+# Improved Redis listener with session-aware message processing
 class RedisListener:
-    """Improved Redis listener with health monitoring and reconnection"""
+    """Improved Redis listener with session-aware message processing"""
     
     def __init__(self, redis_manager: RedisManager):
         self.redis_manager = redis_manager
@@ -192,7 +338,7 @@ class RedisListener:
             return
         
         self.is_running = True
-        logger.info("🔄 Starting Redis WebSocket listener")
+        logger.info("🔄 Starting Redis WebSocket listener with session support")
         
         while self.is_running:
             try:
@@ -214,9 +360,9 @@ class RedisListener:
             return
         
         try:
-            # Subscribe to all WebSocket channels
+            # Subscribe to all WebSocket channels (now session-aware)
             self.pubsub.psubscribe("ws:*")
-            logger.info("🔄 Redis listener subscribed to ws:* channels")
+            logger.info("🔄 Redis listener subscribed to ws:* channels (session-aware)")
             
             while self.is_running and self.redis_manager.is_healthy:
                 try:
@@ -239,31 +385,56 @@ class RedisListener:
                 self.pubsub = None
     
     async def _process_message(self, message):
-        """Process a single Redis message"""
+        """Process a single Redis message with session awareness"""
         try:
-            # Parse channel to extract tenant_id and user_id
+            # Parse channel to extract tenant_id, user_id, device_id, and session_id
             channel = message['channel']
             parts = channel.split(':')
-            if len(parts) >= 3:
+            
+            if len(parts) >= 5 and parts[0] == 'ws':  # ws:tenant:user:device:session
                 tenant_id = parts[1]
                 user_id = parts[2]
-                device_id = parts[3] if len(parts) > 3 else None
+                device_id = parts[3]
+                session_id = parts[4]
                 
-                # Check if user has any connected devices before processing
-                if manager.get_user_device_count(user_id) > 0:
+                # Check if specific session is connected
+                if manager.is_session_connected(tenant_id, user_id, device_id, session_id):
                     # Parse message data
                     data = json.loads(message['data'])
                     
-                    # Forward to WebSocket client - send to all user devices
-                    if device_id:
-                        success = await manager.send_json_to_user_device(tenant_id, user_id, data, device_id)
-                    else:
-                        results = await manager.send_json_to_all_user_devices(tenant_id, user_id, data)
-                        success = any(results.values()) if results else False
+                    # Forward to specific session
+                    success = await manager.send_to_session(tenant_id, user_id, device_id, session_id, data)
                     
                     if success:
                         self.message_count += 1
                         self.last_message_time = time.time()
+                        logger.debug(f"✅ Message delivered to session {tenant_id}|{user_id}|{device_id}|{session_id}")
+                    else:
+                        logger.warning(f"⚠️ Failed to deliver message to session {tenant_id}|{user_id}|{device_id}|{session_id}")
+                else:
+                    logger.debug(f"⚠️ Session not connected: {tenant_id}|{user_id}|{device_id}|{session_id}")
+                    
+            elif len(parts) >= 4:  # Backward compatibility for device-level messages
+                tenant_id = parts[1]
+                user_id = parts[2]
+                device_id = parts[3] if len(parts) > 3 else None
+                
+                # Parse message data
+                data = json.loads(message['data'])
+                
+                if device_id:
+                    # Send to all sessions on device
+                    results = await manager.send_to_device_sessions(tenant_id, user_id, device_id, data)
+                else:
+                    # Send to all user sessions
+                    results = await manager.send_to_all_user_sessions(tenant_id, user_id, data)
+                
+                success = any(results.values()) if results else False
+                if success:
+                    self.message_count += 1
+                    self.last_message_time = time.time()
+            else:
+                logger.warning(f"⚠️ Invalid channel format: {channel}")
                         
         except json.JSONDecodeError as e:
             logger.error(f"❌ Invalid JSON in Redis message: {e}")

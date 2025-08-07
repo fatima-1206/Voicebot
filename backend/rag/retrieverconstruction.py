@@ -261,6 +261,29 @@ def load_documents(include_postgres=True):
             loader = UnstructuredEPubLoader(filepath)
         elif filename.lower().endswith(".txt"):
             loader = TextLoader(filepath, encoding="utf-8")
+        elif filename.lower().endswith(".json"):
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    json_data = json.load(f)
+                    # If the file has a "documents" key, use that
+                    if isinstance(json_data, dict) and "documents" in json_data:
+                        doc_list = json_data["documents"]
+                    else:
+                        doc_list = json_data
+                    # Only process items that have "content"
+                    valid_docs = [
+                        Document(page_content=item["content"], metadata=item.get("metadata", {}))
+                        for item in doc_list if isinstance(item, dict) and "content" in item
+                    ]
+                    if valid_docs:
+                        all_documents.extend(valid_docs)
+                        print(f"  -> Loaded {len(valid_docs)} chunks from {filename}")
+                    else:
+                        print(f"  -> No valid documents with 'content' found in {filename}")
+            except Exception as e:
+                print(f"  -> Error loading {filename}: {e}")
+            continue  # Skip the rest of the loop for .json files
+  
         else:
             continue
 

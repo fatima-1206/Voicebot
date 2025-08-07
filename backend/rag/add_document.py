@@ -35,6 +35,191 @@ splitter = TokenTextSplitter(chunk_size=256, chunk_overlap=64)
 celery_app = Celery('tasks', broker='redis://localhost:6379/0')
 db = None
 
+def _ensure_uuid(value, default_namespace="default"):
+    """
+    Convert a string to a valid UUID, generating one if the string is not a valid UUID.
+    
+    Args:
+        value: String that might be a UUID
+        default_namespace: Namespace to use for generating UUID from string
+    
+    Returns:
+        UUID object
+    """
+    if isinstance(value, UUID):
+        return value
+    
+    if isinstance(value, str):
+        try:
+            # Try to parse as UUID
+            return UUID(value)
+        except ValueError:
+            # Generate a deterministic UUID from the string
+            import hashlib
+            namespace = UUID('6ba7b810-9dad-11d1-80b4-00c04fd430c8')  # DNS namespace
+            name = f"{default_namespace}:{value}"
+            return UUID(bytes=hashlib.md5(name.encode()).digest()[:16], version=None)
+    
+    # Fallback to random UUID
+    return uuid4()
+
+def add_text_document_to_rag(title: str, content: str, doc_id: str, tenant_id: str, user_id: str, is_public: bool, db: Session):
+    """
+    Add a text document directly to the RAG system without file processing.
+    
+    Args:
+        title: Document title
+        content: Document content as text
+        doc_id: Document ID (as string)
+        tenant_id: Tenant ID (as string, will be converted to UUID)
+        user_id: User ID (as string, will be converted to UUID)
+        is_public: Whether document is public
+        db: Database session
+        
+    Returns:
+        Dict with status and processing results
+    """
+    print(f"🔄 Adding text document to RAG: {title}")
+    
+    try:
+        from backend.rag import retrieverconstruction
+
+        # Load retriever state
+        state = retrieverconstruction.load_retriever_state()
+        print(f"📁 Loaded retriever state: {state}")
+
+        # Get or initialize retrievers
+        faiss_db, hybrid_retriever = retrieverconstruction.get_retrievers()
+
+        if faiss_db is None:
+            print("❌ Failed to initialize FAISS vector store")
+            return {"status": "error", "error": "Failed to initialize FAISS vector store"}
+
+        # Convert IDs to UUIDs safely
+        doc_uuid = _ensure_uuid(doc_id, "doc")
+        tenant_uuid = _ensure_uuid(tenant_id, "tenant")
+        user_uuid = _ensure_uuid(user_id, "user")
+
+        print(f"🔄 Processing document: {title}")
+        print(f"   Doc ID: {doc_uuid}")
+        print(f"   Tenant: {tenant_uuid}")
+        print(f"   User: {user_uuid}")
+
+        # Split content into chunks
+        chunks = []
+        chunk_ids = []
+        chunk_data_for_db = []
+
+        chunk_texts = splitter.split_text(content)
+        
+        for chunk_text in chunk_texts:
+            chunk_id = str(uuid4())
+            chunk_ids.append(chunk_id)
+
+            # Add chunk to FAISS list
+            chunks.append(
+                LC_Document(
+                    page_content=chunk_text,
+                    metadata={
+                        "chunk_id": chunk_id,
+                        "filename": f"{title}.txt",
+                        "tenant_id": str(tenant_uuid),
+                        "user_id": str(user_uuid),
+                        "doc_id": str(doc_uuid),
+                        "filetype": ".txt",
+                        "size": len(content),
+                        "is_public": is_public,
+                        "source": "graphql",
+                        "title": title
+                    }
+                )
+            )
+
+            # Store tuple for PostgreSQL insertion
+            chunk_data_for_db.append((chunk_id, chunk_text))
+
+        print(f"📝 Created {len(chunks)} chunks from text document")
+
+        # Add to FAISS vectorstore and update retrievers
+        if len(chunks) > 0:
+            print(f"📝 Adding {len(chunks)} chunks to FAISS vector store...")
+            faiss_db.add_documents(chunks, ids=chunk_ids)
+            retrieverconstruction.save_vectorstore(faiss_db)
+            print("✅ Chunks added to FAISS successfully")
+
+            # Update retrievers
+            faiss_retriever, hybrid_retriever = retrieverconstruction.update_faiss_and_hybrid_retriever(faiss_db)
+
+            if faiss_retriever is not None and hybrid_retriever is not None:
+                retrieverconstruction.faiss_db = faiss_db
+                retrieverconstruction.hybrid_retriever = hybrid_retriever
+                retrieverconstruction.faiss_retriever = faiss_retriever
+                print("✅ Retrievers updated efficiently")
+            else:
+                print("❌ Failed to update retrievers")
+        else:
+            print("⚠️ Warning: No chunks created from document")
+            return {"status": "error", "error": "No chunks created from document"}
+
+        # # Update document metadata in PostgreSQL
+        # print(f"💾 Updating document metadata in PostgreSQL...")
+        # existing_doc = db.query(DB_Document).filter(DB_Document.id == doc_uuid).first()
+        # if existing_doc:
+        #     existing_doc.filename = f"{title}.txt"
+        #     existing_doc.status = "processed"
+        #     print(f"✅ Updated existing document with ID: {existing_doc.id}")
+        # else:
+        #     print(f"💾 Creating new document record")
+        #     db_doc = DB_Document(
+        #         id=doc_uuid,
+        #         filename=f"{title}.txt",
+        #         path=f"graphql:{title}",
+        #         filetype=".txt",
+        #         tenant_id=tenant_uuid,
+        #         user_id=user_uuid,
+        #         is_public=is_public,
+        #         size=len(content),
+        #         status="processed",
+        #         upload_time=datetime.utcnow()
+        #     )
+        #     db.add(db_doc)
+        #     existing_doc = db_doc
+
+        # db.flush()
+
+        # # Store chunks in database
+        # print(f"💾 Saving {len(chunks)} chunks to PostgreSQL...")
+        # chunks_saved = 0
+        # for chunk_id, chunk_text in chunk_data_for_db:
+        #     try:
+        #         db_chunk = DB_Chunk(
+        #             id=chunk_id,
+        #             doc_id=existing_doc.id,
+        #             text=chunk_text,
+        #         )
+        #         db.add(db_chunk)
+        #         chunks_saved += 1
+        #     except Exception as chunk_error:
+        #         print(f"❌ Error saving chunk {chunk_id}: {chunk_error}")
+
+        # # Commit all changes
+        # print("💾 Committing changes to database...")
+        # db.commit()
+        # print(f"✅ Successfully saved {chunks_saved} chunks to PostgreSQL")
+        
+        return {
+            "status": "success",
+            "doc_id": str(doc_uuid),
+            "chunk_count": len(chunks),
+            # "chunks_saved": chunks_saved,
+            "message": f"Text document '{title}' processed successfully"
+        }
+
+    except Exception as e:
+        print(f"❌ Error processing text document '{title}': {str(e)}")
+        db.rollback()
+        return {"status": "error", "error": str(e)}
+
 @celery_app.task(name='process_uploaded_document')
 def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public):
     """
@@ -60,10 +245,10 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         print(f"✅ Retrieved FAISS DB: {faiss_db is not None}")
         print(f"✅ Retrieved Hybrid Retriever: {hybrid_retriever is not None}")
 
-        # Convert string UUIDs to UUID objects
-        doc_id = UUID(doc_id) if isinstance(doc_id, str) else doc_id
-        tenant_id = UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
-        user_id = UUID(user_id) if isinstance(user_id, str) else user_id
+        # Convert string UUIDs to UUID objects safely
+        doc_uuid = _ensure_uuid(doc_id, "doc")
+        tenant_uuid = _ensure_uuid(tenant_id, "tenant")
+        user_uuid = _ensure_uuid(user_id, "user")
 
         # Step 1: Save to temp file
         extension = os.path.splitext(filename)[-1].lower()
@@ -102,9 +287,9 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
                         metadata={
                             "chunk_id": chunk_id,
                             "filename": filename,
-                            "tenant_id": str(tenant_id),
-                            "user_id": str(user_id),
-                            "doc_id": str(doc_id),
+                            "tenant_id": str(tenant_uuid),
+                            "user_id": str(user_uuid),
+                            "doc_id": str(doc_uuid),
                             "filetype": extension,
                             "size": len(file_bytes),
                             "is_public": is_public,
@@ -140,20 +325,20 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
 
         # Step 6: Update document metadata in PostgreSQL (don't create new, update existing)
         print(f"💾 Updating document metadata in PostgreSQL...")
-        existing_doc = db.query(DB_Document).filter(DB_Document.id == doc_id).first()
+        existing_doc = db.query(DB_Document).filter(DB_Document.id == doc_uuid).first()
         if existing_doc:
             existing_doc.path = temp_path
             existing_doc.status = "processed"
             print(f"✅ Updated existing document with ID: {existing_doc.id}")
         else:
-            print(f"⚠️ Warning: Document with ID {doc_id} not found, creating new record")
+            print(f"⚠️ Warning: Document with ID {doc_uuid} not found, creating new record")
             db_doc = DB_Document(
-                id=doc_id,
+                id=doc_uuid,
                 filename=filename,
                 path=temp_path,
                 filetype=extension,
-                tenant_id=tenant_id,
-                user_id=user_id,
+                tenant_id=tenant_uuid,
+                user_id=user_uuid,
                 is_public=is_public,
                 size=len(file_bytes),
                 status="processed",
@@ -187,7 +372,7 @@ def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, 
         
         return {
             "status": "success",
-            "doc_id": str(doc_id),
+            "doc_id": str(doc_uuid),
             "chunks_created": len(chunks),
             "chunks_saved": chunks_saved,
             "message": f"Document '{filename}' processed successfully"

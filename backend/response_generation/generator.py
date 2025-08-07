@@ -203,7 +203,7 @@ def generate_response(
         # Manually retrieve docs, filter, and run LLM
         retriever = rag_chain.retriever
         docs = retriever.get_relevant_documents(query)
-
+        docs=docs[:2]
         # This approach gives smarter responses in case the user hasn't uploaded any documents ---------------------------------------------
         # Filter by tenant_id and user_id
         # print("DOCS BEFORE FILTERING:", len(docs))
@@ -252,7 +252,7 @@ def generate_response(
 
 
 
-def generate_response_with_reranking(query: str, top_k: int = 2) -> str:
+def generate_response_with_reranking(query: str, top_k: int = 1) -> str:
     """
     Generate a response using RAG with reranking.
     Thread-safe for Celery workers.

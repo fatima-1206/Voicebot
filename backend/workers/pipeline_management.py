@@ -42,10 +42,11 @@ def transcribe_and_respond_task(self, audio_bytes: bytes, user_id: str, chunk_id
                 query=transcript,
                 tenant_id=tenant_id,
                 user_id=user_id,
+                device_id=stt_result.get('device_id', None),
+                session_id=stt_result.get('session_id', None),
                 language=tts_language,
                 voice=voice,
                 stream_audio=True,
-                session_id=None,  # Could be passed from WebSocket
                 use_rag=use_rag,
                 fallback_on_error=fallback_on_error
             )
@@ -70,7 +71,7 @@ def transcribe_and_respond_task(self, audio_bytes: bytes, user_id: str, chunk_id
 
 @celery_app.task(name='audio_to_audio_pipeline')
 def audio_to_audio_pipeline(task_id: str, audio_data: str, filename: str, tenant_id: str, 
-                          user_id: str, language: str = "en", voice: str = "",
+                          user_id: str, device_id: str, session_id: str, language: str = "en", voice: str = "",
                           stream_audio: bool = True, use_rag: bool = True,
                           fallback_on_error: bool = True):
     """

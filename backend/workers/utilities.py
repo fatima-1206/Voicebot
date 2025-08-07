@@ -232,7 +232,7 @@ def safe_redis_publish(channel: str, message: dict, max_retries: int = 3) -> boo
         logger.error(f"❌ Failed to publish to Redis channel {channel}: {e}")
         return False
 
-def notify_audio_status(tenant_id: str, user_id: str, task_id: str, number_of_scentences:int, status: str, data: dict) -> bool:
+def notify_audio_status(tenant_id: str, user_id: str, device_id: str, session_id: str, task_id: str, number_of_scentences:int, status: str, data: dict) -> bool:
     """Notify audio status via WebSocket with improved error handling"""
     try:
         message = {
@@ -256,7 +256,7 @@ def notify_audio_status(tenant_id: str, user_id: str, task_id: str, number_of_sc
         logger.error(f"❌ Failed to notify audio status: {e}")
         return False
 
-def notify_text_response_ready(tenant_id: str, user_id: str, query_id: str, query: str, response: str, use_rag: bool = True) -> bool:
+def notify_text_response_ready(tenant_id: str, user_id: str, device_id: str, session_id: str, query_id: str, query: str, response: str, use_rag: bool = True) -> bool:
     """Notify that text response is ready with improved error handling"""
     try:
         message = {
@@ -282,7 +282,7 @@ def notify_text_response_ready(tenant_id: str, user_id: str, query_id: str, quer
         logger.error(f"❌ Failed to notify text response: {e}")
         return False
     
-def notify_error(tenant_id: str, user_id: str, query_id: str, error: str) -> bool:
+def notify_error(tenant_id: str, user_id: str, device_id: str, session_id: str, query_id: str, error: str) -> bool:
     """Notify error via WebSocket with improved error handling"""
     try:
         message = {
@@ -402,6 +402,6 @@ def format_duration(seconds: float) -> str:
         return f"{minutes}m {remaining_seconds:.1f}s"
 
 # Backward compatibility aliases
-def notify_websocket_message(tenant_id: str, user_id: str, message: dict) -> bool:
+def notify_websocket_message(tenant_id: str, user_id: str, device_id: str, session_id: str, message: dict) -> bool:
     """Legacy function for backward compatibility"""
     return safe_redis_publish(f"ws:{tenant_id}:{user_id}", message)

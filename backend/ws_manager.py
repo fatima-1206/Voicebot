@@ -21,7 +21,7 @@ class ConnectionMetrics:
         self.connections_created = 0
         self.connections_closed = 0
         self.last_cleanup = time.time()
-        self.message_rates = defaultdict(list)  # tenant_id:user_id -> list of timestamps
+        self.message_rates = defaultdict(list)  # connection_key -> list of timestamps
         
     def record_connection(self):
         self.connections_created += 1
@@ -87,15 +87,22 @@ class RateLimiter:
                 del self.message_times[key]
 
 class ConnectionManager:
-    """Enhanced WebSocket connection manager with multi-device support"""
+    """Enhanced WebSocket connection manager with tenant|user|device|session support"""
     
-    def __init__(self, max_connections_per_user: int = 10, max_devices_per_user: int = 5, message_rate_limit: int = 100):
-        # Change to support multiple devices per user
-        self.active_connections: Dict[str, WebSocket] = {}  # maps tenant_id:user_id:device_id → WebSocket
+    def __init__(self, max_connections_per_user: int = 10, max_devices_per_user: int = 5, max_sessions_per_device: int = 10, message_rate_limit: int = 100):
+        # Connection hierarchy: tenant|user|device|session
+        self.active_connections: Dict[str, WebSocket] = {}  # maps tenant|user|device|session → WebSocket
         self.connection_metadata: Dict[str, Dict[str, Any]] = {}  # Store connection metadata
-        self.user_connections: Dict[str, Dict[str, str]] = defaultdict(dict)  # user_id → {device_id: connection_key}
+        
+        # Hierarchical tracking
+        self.tenant_users: Dict[str, Set[str]] = defaultdict(set)  # tenant_id → {user_ids}
+        self.user_devices: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))  # tenant|user → {device_id: {session_ids}}
+        self.device_sessions: Dict[str, Set[str]] = defaultdict(set)  # tenant|user|device → {session_ids}
+        
+        # Limits
         self.max_connections_per_user = max_connections_per_user
         self.max_devices_per_user = max_devices_per_user
+        self.max_sessions_per_device = max_sessions_per_device
         
         # Monitoring and metrics
         self.metrics = ConnectionMetrics()
@@ -109,215 +116,250 @@ class ConnectionManager:
         self._sync_lock = threading.Lock()
         self._async_lock = asyncio.Lock()
         
-    async def connect(self, tenant_id: str, user_id: str, websocket: WebSocket, device_id: str = None) -> bool:
-        """Connect a WebSocket with multi-device support"""
+    def _create_connection_key(self, tenant_id: str, user_id: str, device_id: str, session_id: str) -> str:
+        """Create standardized connection key"""
+        return f"{tenant_id}|{user_id}|{device_id}|{session_id}"
+    
+    def _create_user_key(self, tenant_id: str, user_id: str) -> str:
+        """Create user key for hierarchical tracking"""
+        return f"{tenant_id}|{user_id}"
+    
+    def _create_device_key(self, tenant_id: str, user_id: str, device_id: str) -> str:
+        """Create device key for hierarchical tracking"""
+        return f"{tenant_id}|{user_id}|{device_id}"
+    
+    def _parse_connection_key(self, key: str) -> tuple:
+        """Parse connection key into components"""
+        try:
+            parts = key.split('|')
+            if len(parts) == 4:
+                return parts[0], parts[1], parts[2], parts[3]  # tenant, user, device, session
+            else:
+                raise ValueError(f"Invalid connection key format: {key}")
+        except Exception as e:
+            logger.error(f"Error parsing connection key {key}: {e}")
+            return None, None, None, None
+        
+    async def connect(self, tenant_id: str, user_id: str, websocket: WebSocket, session_id: str, device_id: str = None) -> bool:
+        """Connect a WebSocket with tenant|user|device|session hierarchy"""
         if not device_id:
             device_id = str(uuid4())
+        
+        if not session_id:
+            session_id = str(uuid4())
             
-        key = f"{tenant_id}:{user_id}:{device_id}"
+        connection_key = self._create_connection_key(tenant_id, user_id, device_id, session_id)
+        user_key = self._create_user_key(tenant_id, user_id)
+        device_key = self._create_device_key(tenant_id, user_id, device_id)
 
         async with self._async_lock:
-            # Check device limits per user
-            if len(self.user_connections[user_id]) >= self.max_devices_per_user:
-                logger.warning(f"❌ Device limit exceeded for user {user_id}")
+            # Check limits
+            if len(self.user_devices[user_key]) >= self.max_devices_per_user:
+                logger.warning(f"❌ Device limit exceeded for user {user_key}")
                 await websocket.close(code=1008, reason="Device limit exceeded")
+                return False
+                
+            if len(self.device_sessions[device_key]) >= self.max_sessions_per_device:
+                logger.warning(f"❌ Session limit exceeded for device {device_key}")
+                await websocket.close(code=1008, reason="Session limit exceeded")
                 return False
 
             try:
                 # Store connection and metadata
-                self.active_connections[key] = websocket
-                self.connection_metadata[key] = {
+                self.active_connections[connection_key] = websocket
+                self.connection_metadata[connection_key] = {
                     "connected_at": datetime.now(),
                     "last_activity": time.time(),
                     "message_count": 0,
                     "tenant_id": tenant_id,
                     "user_id": user_id,
-                    "device_id": device_id
+                    "device_id": device_id,
+                    "session_id": session_id
                 }
-                self.user_connections[user_id][device_id] = key
+                
+                # Update hierarchical tracking
+                self.tenant_users[tenant_id].add(user_id)
+                self.user_devices[user_key][device_id].add(session_id)
+                self.device_sessions[device_key].add(session_id)
 
                 # Update metrics
                 self.metrics.record_connection()
 
-                logger.info(f"✅ WebSocket connected: {key} (Total: {len(self.active_connections)})")
+                logger.info(f"✅ WebSocket connected: {connection_key} (Total: {len(self.active_connections)})")
                 return True
 
             except Exception as e:
-                logger.error(f"❌ Error accepting WebSocket connection {key}: {e}")
+                logger.error(f"❌ Error accepting WebSocket connection {connection_key}: {e}")
                 return False
 
-    def disconnect(self, tenant_id: str, user_id: str, device_id: str = None) -> bool:
-        """Disconnect with proper cleanup for specific device"""
-        if device_id:
-            key = f"{tenant_id}:{user_id}:{device_id}"
-            return self._disconnect_single_device(key, user_id, device_id)
-        else:
-            # Disconnect all devices for user (backward compatibility)
-            return self._disconnect_all_user_devices(tenant_id, user_id)
+    def disconnect(self, tenant_id: str, user_id: str, session_id: str, device_id: str = None) -> bool:
+        """Disconnect specific session"""
+        if not device_id:
+            # If no device_id provided, find it from existing connections
+            user_key = self._create_user_key(tenant_id, user_id)
+            for dev_id, sessions in self.user_devices[user_key].items():
+                if session_id in sessions:
+                    device_id = dev_id
+                    break
+            
+            if not device_id:
+                logger.warning(f"Could not find device for session {session_id}")
+                return False
+        
+        connection_key = self._create_connection_key(tenant_id, user_id, device_id, session_id)
+        return self._disconnect_single_session(connection_key, tenant_id, user_id, device_id, session_id)
     
-    def _disconnect_single_device(self, key: str, user_id: str, device_id: str) -> bool:
-        """Disconnect a single device"""
+    def _disconnect_single_session(self, connection_key: str, tenant_id: str, user_id: str, device_id: str, session_id: str) -> bool:
+        """Disconnect a single session"""
         with self._sync_lock:
-            if key in self.active_connections:
+            if connection_key in self.active_connections:
                 try:
-                    # Clean up all data structures
-                    del self.active_connections[key]
-                    if key in self.connection_metadata:
-                        del self.connection_metadata[key]
+                    # Clean up connection
+                    del self.active_connections[connection_key]
+                    if connection_key in self.connection_metadata:
+                        del self.connection_metadata[connection_key]
                     
-                    # Remove from user connections
-                    if user_id in self.user_connections and device_id in self.user_connections[user_id]:
-                        del self.user_connections[user_id][device_id]
-                        if not self.user_connections[user_id]:
-                            del self.user_connections[user_id]
+                    # Clean up hierarchical tracking
+                    user_key = self._create_user_key(tenant_id, user_id)
+                    device_key = self._create_device_key(tenant_id, user_id, device_id)
+                    
+                    # Remove session from device
+                    if device_key in self.device_sessions:
+                        self.device_sessions[device_key].discard(session_id)
+                        if not self.device_sessions[device_key]:
+                            del self.device_sessions[device_key]
+                    
+                    # Remove session from user's device tracking
+                    if user_key in self.user_devices and device_id in self.user_devices[user_key]:
+                        self.user_devices[user_key][device_id].discard(session_id)
+                        if not self.user_devices[user_key][device_id]:
+                            del self.user_devices[user_key][device_id]
+                        
+                        # If user has no devices, remove from tenant
+                        if not self.user_devices[user_key]:
+                            del self.user_devices[user_key]
+                            self.tenant_users[tenant_id].discard(user_id)
+                            if not self.tenant_users[tenant_id]:
+                                del self.tenant_users[tenant_id]
                     
                     # Update metrics
                     self.metrics.record_disconnection()
                     
-                    logger.info(f"🔌 WebSocket disconnected: {key} (Total: {len(self.active_connections)})")
+                    logger.info(f"🔌 WebSocket disconnected: {connection_key} (Total: {len(self.active_connections)})")
                     return True
                     
                 except Exception as e:
-                    logger.error(f"❌ Error during disconnect for {key}: {e}")
+                    logger.error(f"❌ Error during disconnect for {connection_key}: {e}")
                     return False
             
             return False
-    
-    def _disconnect_all_user_devices(self, tenant_id: str, user_id: str) -> bool:
-        """Disconnect all devices for a user"""
-        success = True
-        if user_id in self.user_connections:
-            device_keys = list(self.user_connections[user_id].keys())
-            for device_id in device_keys:
-                key = f"{tenant_id}:{user_id}:{device_id}"
-                if not self._disconnect_single_device(key, user_id, device_id):
-                    success = False
-        return success
 
-    async def send_to_user_device(self, tenant_id: str, user_id: str, message: str, device_id: str = None) -> bool:
-        """Send message to specific device or all user devices"""
-        if device_id:
-            key = f"{tenant_id}:{user_id}:{device_id}"
-            return await self._send_to_connection(key, message)
-        else:
-            # Send to all user devices
-            return await self.send_to_all_user_devices(tenant_id, user_id, message)
-    
-    async def send_to_all_user_devices(self, tenant_id: str, user_id: str, message: str) -> Dict[str, bool]:
-        """Send message to all devices of a user"""
+    async def send_to_session(self, tenant_id: str, user_id: str, device_id: str, session_id: str, data: dict) -> bool:
+        """Send message to specific session"""
+        connection_key = self._create_connection_key(tenant_id, user_id, device_id, session_id)
+        return await self._send_json_to_connection(connection_key, data)
+
+    async def send_to_all_user_sessions(self, tenant_id: str, user_id: str, data: dict) -> Dict[str, bool]:
+        """Send message to all sessions across all devices for a user"""
         results = {}
-        if user_id in self.user_connections:
-            for device_id, connection_key in self.user_connections[user_id].items():
-                results[device_id] = await self._send_to_connection(connection_key, message)
+        user_key = self._create_user_key(tenant_id, user_id)
+        
+        if user_key in self.user_devices:
+            for device_id, sessions in self.user_devices[user_key].items():
+                for session_id in sessions:
+                    connection_key = self._create_connection_key(tenant_id, user_id, device_id, session_id)
+                    success = await self._send_json_to_connection(connection_key, data)
+                    results[f"{device_id}|{session_id}"] = success
+        
         return results
 
-    async def send_json_to_user_device(self, tenant_id: str, user_id: str, data: dict, device_id: str = None) -> bool:
-        """Send JSON to specific device or all user devices"""
-        if device_id:
-            key = f"{tenant_id}:{user_id}:{device_id}"
-            return await self._send_json_to_connection(key, data)
-        else:
-            # Send to all user devices
-            return await self.send_json_to_all_user_devices(tenant_id, user_id, data)
-    
-    async def send_json_to_all_user_devices(self, tenant_id: str, user_id: str, data: dict) -> Dict[str, bool]:
-        """Send JSON to all devices of a user"""
+    async def send_to_device_sessions(self, tenant_id: str, user_id: str, device_id: str, data: dict) -> Dict[str, bool]:
+        """Send message to all sessions on a specific device"""
         results = {}
-        if user_id in self.user_connections:
-            for device_id, connection_key in self.user_connections[user_id].items():
-                results[device_id] = await self._send_json_to_connection(connection_key, data)
+        device_key = self._create_device_key(tenant_id, user_id, device_id)
+        
+        if device_key in self.device_sessions:
+            for session_id in self.device_sessions[device_key]:
+                connection_key = self._create_connection_key(tenant_id, user_id, device_id, session_id)
+                success = await self._send_json_to_connection(connection_key, data)
+                results[session_id] = success
+        
+        return results
+
+    async def send_to_tenant_sessions(self, tenant_id: str, data: dict) -> Dict[str, bool]:
+        """Send message to all sessions in a tenant"""
+        results = {}
+        
+        if tenant_id in self.tenant_users:
+            for user_id in self.tenant_users[tenant_id]:
+                user_results = await self.send_to_all_user_sessions(tenant_id, user_id, data)
+                results.update(user_results)
+        
         return results
 
     # Helper methods for sending to connections
-    async def _send_to_connection(self, key: str, message: str) -> bool:
-        """Send text message to a specific connection"""
-        # Check rate limit
-        if not self.rate_limiter.is_allowed(key):
-            logger.warning(f"⚠️ Rate limit exceeded for {key}")
-            return False
-        
-        ws = None
-        with self._sync_lock:
-            ws = self.active_connections.get(key)
-            if ws:
-                # Update activity
-                if key in self.connection_metadata:
-                    self.connection_metadata[key]["last_activity"] = time.time()
-                    self.connection_metadata[key]["message_count"] += 1
-        
-        if ws and await self._is_websocket_alive(ws):
-            try:
-                await ws.send_text(message)
-                self.metrics.record_send_success(key)
-                return True
-            except Exception as e:
-                logger.warning(f"❌ Failed to send text to {key}: {e}")
-                self.metrics.record_send_failure(key)
-                self._cleanup_connection(key)
-                return False
-        else:
-            if ws:
-                self._cleanup_connection(key)
-            return False
-
-    async def _send_json_to_connection(self, key: str, data: dict) -> bool:
+    async def _send_json_to_connection(self, connection_key: str, data: dict) -> bool:
         """Send JSON data to a specific connection"""
         # Check rate limit
-        if not self.rate_limiter.is_allowed(key):
-            logger.warning(f"⚠️ Rate limit exceeded for {key}")
+        if not self.rate_limiter.is_allowed(connection_key):
+            logger.warning(f"⚠️ Rate limit exceeded for {connection_key}")
             return False
         
         # Validate payload size
         try:
             payload = json.dumps(data)
             if len(payload) > 1024 * 1024:  # 1MB limit
-                logger.warning(f"⚠️ Payload too large for {key}: {len(payload)} bytes")
+                logger.warning(f"⚠️ Payload too large for {connection_key}: {len(payload)} bytes")
                 return False
         except Exception as e:
-            logger.error(f"❌ Invalid JSON payload for {key}: {e}")
+            logger.error(f"❌ Invalid JSON payload for {connection_key}: {e}")
             return False
         
         ws = None
         with self._sync_lock:
-            ws = self.active_connections.get(key)
+            ws = self.active_connections.get(connection_key)
             if ws:
                 # Update activity
-                if key in self.connection_metadata:
-                    self.connection_metadata[key]["last_activity"] = time.time()
-                    self.connection_metadata[key]["message_count"] += 1
+                if connection_key in self.connection_metadata:
+                    self.connection_metadata[connection_key]["last_activity"] = time.time()
+                    self.connection_metadata[connection_key]["message_count"] += 1
         
         if ws and await self._is_websocket_alive(ws):
             try:
                 await ws.send_json(data)
-                self.metrics.record_send_success(key)
+                self.metrics.record_send_success(connection_key)
                 return True
             except Exception as e:
-                logger.warning(f"❌ Failed to send JSON to {key}: {e}")
-                self.metrics.record_send_failure(key)
-                self._cleanup_connection(key)
+                logger.warning(f"❌ Failed to send JSON to {connection_key}: {e}")
+                self.metrics.record_send_failure(connection_key)
+                await self._cleanup_connection_async(connection_key)
                 return False
         else:
             if ws:
-                self._cleanup_connection(key)
+                await self._cleanup_connection_async(connection_key)
             return False
 
-    def get_user_devices(self, user_id: str) -> List[str]:
-        """Get list of device IDs for a user"""
-        return list(self.user_connections.get(user_id, {}).keys())
+    def get_user_devices(self, tenant_id: str, user_id: str) -> Dict[str, List[str]]:
+        """Get all devices and their sessions for a user"""
+        user_key = self._create_user_key(tenant_id, user_id)
+        result = {}
+        
+        if user_key in self.user_devices:
+            for device_id, sessions in self.user_devices[user_key].items():
+                result[device_id] = list(sessions)
+        
+        return result
     
-    def get_user_device_count(self, user_id: str) -> int:
-        """Get number of connected devices for a user"""
-        return len(self.user_connections.get(user_id, {}))
+    def get_device_sessions(self, tenant_id: str, user_id: str, device_id: str) -> List[str]:
+        """Get all sessions for a specific device"""
+        device_key = self._create_device_key(tenant_id, user_id, device_id)
+        return list(self.device_sessions.get(device_key, set()))
 
-    def is_connected(self, tenant_id: str, user_id: str, device_id: str = None) -> bool:
-        """Check if a user or specific device is connected"""
-        if device_id:
-            key = f"{tenant_id}:{user_id}:{device_id}"
-            with self._sync_lock:
-                return key in self.active_connections
-        else:
-            # Check if user has any connected devices
-            return self.get_user_device_count(user_id) > 0
+    def is_session_connected(self, tenant_id: str, user_id: str, device_id: str, session_id: str) -> bool:
+        """Check if a specific session is connected"""
+        connection_key = self._create_connection_key(tenant_id, user_id, device_id, session_id)
+        with self._sync_lock:
+            return connection_key in self.active_connections
 
     async def _is_websocket_alive(self, websocket: WebSocket) -> bool:
         """Enhanced WebSocket health check"""
@@ -331,20 +373,11 @@ class ConnectionManager:
         except Exception:
             return False
 
-    def _cleanup_connection(self, key: str) -> None:
-        """Internal method to clean up a connection (synchronous)"""
-        with self._sync_lock:
-            if key in self.active_connections:
-                del self.active_connections[key]
-            if key in self.connection_metadata:
-                user_id = self.connection_metadata[key].get("user_id")
-                del self.connection_metadata[key]
-                
-                # Clean up user connections
-                if user_id and user_id in self.user_connections:
-                    self.user_connections[user_id].discard(key)
-                    if not self.user_connections[user_id]:
-                        del self.user_connections[user_id]
+    async def _cleanup_connection_async(self, connection_key: str) -> None:
+        """Async version of connection cleanup"""
+        tenant_id, user_id, device_id, session_id = self._parse_connection_key(connection_key)
+        if all([tenant_id, user_id, device_id, session_id]):
+            self._disconnect_single_session(connection_key, tenant_id, user_id, device_id, session_id)
 
     async def cleanup_stale_connections(self, max_idle_seconds: int = 300) -> Dict[str, Any]:
         """Clean up stale connections with improved error handling"""
@@ -357,25 +390,25 @@ class ConnectionManager:
             stale_keys = []
             
             with self._sync_lock:
-                for key, metadata in self.connection_metadata.items():
+                for connection_key, metadata in self.connection_metadata.items():
                     last_activity = metadata.get("last_activity", 0)
                     if current_time - last_activity > max_idle_seconds:
-                        stale_keys.append(key)
+                        stale_keys.append(connection_key)
             
             # Clean up stale connections
-            for key in stale_keys:
+            for connection_key in stale_keys:
                 ws = None
                 with self._sync_lock:
-                    ws = self.active_connections.get(key)
+                    ws = self.active_connections.get(connection_key)
                 
                 if ws:
                     try:
                         await ws.close(code=1001, reason="Connection idle timeout")
                     except Exception:
                         pass  # Connection might already be closed
-                    
-                self._cleanup_connection(key)
-                logger.info(f"🧹 Cleaned up stale connection: {key}")
+                
+                await self._cleanup_connection_async(connection_key)
+                logger.info(f"🧹 Cleaned up stale connection: {connection_key}")
             
             # Clean up rate limiter and metrics
             self.rate_limiter.cleanup()
@@ -405,15 +438,15 @@ class ConnectionManager:
             with self._sync_lock:
                 connections_to_check = list(self.active_connections.items())
             
-            for key, ws in connections_to_check:
+            for connection_key, ws in connections_to_check:
                 if await self._is_websocket_alive(ws):
                     alive_count += 1
                 else:
-                    dead_connections.append(key)
+                    dead_connections.append(connection_key)
             
             # Clean up dead connections
-            for key in dead_connections:
-                self._cleanup_connection(key)
+            for connection_key in dead_connections:
+                await self._cleanup_connection_async(connection_key)
             
             return {
                 "status": "healthy",
@@ -440,29 +473,26 @@ class ConnectionManager:
         with self._sync_lock:
             return len(self.active_connections)
 
-    def get_connected_users(self) -> list:
-        """Get list of connected users with metadata"""
+    def get_connection_hierarchy_stats(self) -> Dict[str, Any]:
+        """Get statistics about the connection hierarchy"""
         with self._sync_lock:
-            return [
-                {
-                    "key": key,
-                    "metadata": metadata
+            return {
+                "total_connections": len(self.active_connections),
+                "tenants": len(self.tenant_users),
+                "total_users": sum(len(users) for users in self.tenant_users.values()),
+                "total_devices": sum(len(devices) for devices in self.user_devices.values()),
+                "total_sessions": sum(len(sessions) for sessions in self.device_sessions.values()),
+                "tenant_breakdown": {
+                    tenant_id: {
+                        "users": len(users),
+                        "total_user_devices": sum(
+                            len(self.user_devices.get(f"{tenant_id}|{user_id}", {})) 
+                            for user_id in users
+                        )
+                    }
+                    for tenant_id, users in self.tenant_users.items()
                 }
-                for key, metadata in self.connection_metadata.items()
-            ]
-
-    def get_user_connections(self, user_id: str) -> list:
-        """Get all connections for a specific user"""
-        with self._sync_lock:
-            return list(self.user_connections.get(user_id, set()))
-
-    def get_connection_info(self, tenant_id: str, user_id: str) -> Optional[Dict[str, Any]]:
-        """Get connection information for a specific user"""
-        key = f"{tenant_id}:{user_id}"
-        with self._sync_lock:
-            if key in self.connection_metadata:
-                return self.connection_metadata[key].copy()
-            return None
+            }
 
     async def ping_all_connections(self) -> Dict[str, Any]:
         """Ping all connections to verify they're alive"""
@@ -472,7 +502,7 @@ class ConnectionManager:
         with self._sync_lock:
             connections_to_ping = list(self.active_connections.items())
         
-        for key, ws in connections_to_ping:
+        for connection_key, ws in connections_to_ping:
             try:
                 if await self._is_websocket_alive(ws):
                     # Send a ping message
@@ -483,7 +513,7 @@ class ConnectionManager:
                     
             except Exception as e:
                 results["failed"] += 1
-                results["errors"].append(f"{key}: {str(e)}")
+                results["errors"].append(f"{connection_key}: {str(e)}")
         
         return results
 

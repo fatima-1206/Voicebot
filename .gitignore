@@ -225,3 +225,14 @@ var/run/
 context.txt
 chat.txt
 transcription.txt
+backend/rag/knowledge_base/*.txt
+backend/rag/knowledge_base/**
+backend/rag/knowledge_base/**/*
+backend/rag/knowledge_base/graphql_string_texts/
+backend/rag/knowledge_base/link
+.pem
+*.pem
+docker/ssl/*
+*.crt
+*.key
+*.cnf

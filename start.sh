@@ -179,8 +179,70 @@ CELERY_PID=$!
 # Wait for Celery to start
 sleep 3
 
+IP_ADDR="111.68.96.71"
+CERT_FILE="cert.pem"
+KEY_FILE="key.pem"
+
+echo "🔐 Generating SSL certificate for IP: $IP_ADDR"
+
+# Create config for SAN
+cat > ssl.cnf <<EOL
+[req]
+default_bits       = 2048
+distinguished_name = req_distinguished_name
+req_extensions     = req_ext
+x509_extensions    = v3_req
+prompt             = no
+
+[req_distinguished_name]
+CN = $IP_ADDR
+
+[req_ext]
+subjectAltName = @alt_names
+
+[v3_req]
+subjectAltName = @alt_names
+
+[alt_names]
+IP.1 = $IP_ADDR
+DNS.1 = localhost
+EOL
+
+# Generate the cert with SAN
+openssl req -x509 -nodes -days 365 \
+  -newkey rsa:2048 \
+  -keyout "$KEY_FILE" \
+  -out "$CERT_FILE" \
+  -config ssl.cnf
+
+rm ssl.cnf
+
+echo "✅ SSL certificate generated for IP and localhost"
+
 # Start FastAPI server
 echo -e "${YELLOW}🌐 Starting FastAPI server...${NC}"
+# Enhanced SSL configuration
+SSL_CERT="cert.pem"
+SSL_KEY="key.pem"
+SSL_PORT=8443  # Use 8443 for HTTPS to avoid needing root
+
+# Check for SSL certificates
+SSL_ARGS=""
+PROTOCOL="http"
+if [ -f "$SSL_CERT" ] && [ -f "$SSL_KEY" ]; then
+    SSL_ARGS="--ssl-keyfile $SSL_KEY --ssl-certfile $SSL_CERT"
+    PROTOCOL="https"
+    echo -e "${YELLOW}🔒 SSL enabled with $SSL_CERT and $SSL_KEY${NC}"
+    
+    # Use SSL port if certificates exist
+    if [ "$FASTAPI_PORT" = "8000" ]; then
+        FASTAPI_PORT=$SSL_PORT
+        echo -e "${YELLOW}🔄 Switching to SSL port: $SSL_PORT${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠️ SSL cert/key not found, starting without SSL${NC}"
+fi
+
 if [ "$DEV_MODE" = true ]; then
     python -m uvicorn backend.main:app \
         --reload \
@@ -188,14 +250,16 @@ if [ "$DEV_MODE" = true ]; then
         --port $FASTAPI_PORT \
         --ws-ping-interval 30 \
         --ws-ping-timeout 30 \
-        --timeout-keep-alive 300 &
+        --timeout-keep-alive 300 \
+        $SSL_ARGS &
 else
     python -m uvicorn backend.main:app \
         --host $FASTAPI_HOST \
         --port $FASTAPI_PORT \
         --ws-ping-interval 30 \
         --ws-ping-timeout 30 \
-        --timeout-keep-alive 300 &
+        --timeout-keep-alive 300 \
+        $SSL_ARGS &
 fi
 FASTAPI_PID=$!
 

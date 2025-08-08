@@ -86,7 +86,10 @@ def format_prompt(question: str, context: str) -> str:
     with open("context.txt", "a") as f:
         f.write(f"\n\nQuestion: {question}\n")
         f.write(f"Context: {context}\n")
-    return f"""You are an intelligent assistant capable of holding conversations. Your response should be concise, informative, and relevant to the user's questions. Ignore the context if it  is not usefull. Answer within {max_new_tokens*4-100} characters.
+        # 1 token = 4 characters on average, so we reserve space for the answer
+    max_new_tokens = config["max_new_tokens"]
+    # f.write(f"Max new tokens: {max_new_tokens}\n")
+    return f"""You are an intelligent assistant capable of holding conversations. Your response should be concise, informative, and relevant to the user's questions. Ignore the context if it is not useful (it's usually not). Don't mention the context in the answer. Answer within {max_new_tokens*4-100} characters.
 
     Question: {question}
 
@@ -203,7 +206,7 @@ def generate_response(
         # Manually retrieve docs, filter, and run LLM
         retriever = rag_chain.retriever
         docs = retriever.get_relevant_documents(query)
-        docs=docs[:2]
+        docs=docs[:3]
         # This approach gives smarter responses in case the user hasn't uploaded any documents ---------------------------------------------
         # Filter by tenant_id and user_id
         # print("DOCS BEFORE FILTERING:", len(docs))
@@ -252,7 +255,7 @@ def generate_response(
 
 
 
-def generate_response_with_reranking(query: str, top_k: int = 1) -> str:
+def generate_response_with_reranking(query: str, top_k: int = 3) -> str:
     """
     Generate a response using RAG with reranking.
     Thread-safe for Celery workers.

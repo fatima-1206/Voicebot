@@ -327,13 +327,15 @@ class RAGDocumentProcessor:
         else:
             return str(item)
     
-    def _extract_comprehensive_keywords(self, entity: Dict[str, Any], typename: str, entity_name: str) -> List[str]:
+    def _extract_comprehensive_keywords(self, entity: Dict[str, Any], typename: str, entity_name: Any) -> List[str]:
         """Extract comprehensive searchable keywords from entity"""
-        keywords = [typename.lower(), entity_name.lower()]
+        # Convert entity_name to string if it's not already
+        entity_name_str = str(entity_name) if entity_name is not None else ""
+        keywords = [typename.lower(), entity_name_str.lower()]
         
         # Add words from entity name
-        if entity_name:
-            keywords.extend(entity_name.lower().split())
+        if entity_name_str:
+            keywords.extend(entity_name_str.lower().split())
         
         # Add values from key fields
         key_fields = ["name", "code", "title", "native", "capital", "currency", "status", "species", "gender", "type", "dimension", "episode"]
@@ -351,15 +353,17 @@ class RAGDocumentProcessor:
                 if isinstance(value, list):
                     for item in value[:3]:  # Limit to first 3 items
                         if isinstance(item, dict) and "name" in item:
-                            keywords.extend(item["name"].lower().split())
+                            name_value = str(item["name"])
+                            keywords.extend(name_value.lower().split())
                 elif isinstance(value, dict) and "name" in value:
-                    keywords.extend(value["name"].lower().split())
+                    name_value = str(value["name"])
+                    keywords.extend(name_value.lower().split())
         
         # Clean and deduplicate keywords
         cleaned_keywords = []
         for keyword in keywords:
             # Remove special characters and split compound words
-            clean_word = "".join(c for c in keyword if c.isalnum() or c.isspace()).strip()
+            clean_word = "".join(c for c in str(keyword) if c.isalnum() or c.isspace()).strip()
             if clean_word and len(clean_word) > 1:
                 cleaned_keywords.extend(clean_word.split())
         

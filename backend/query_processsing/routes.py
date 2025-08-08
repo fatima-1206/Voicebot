@@ -54,17 +54,17 @@ class QueryWithTTSResponse(BaseModel):
     status: str
     message: str
 
-# class GraphQLToRAGRequest(BaseModel):
-#     api_url: str
-#     headers: Optional[Dict[str, str]] = None
-#     source_name: Optional[str] = None
-#     max_depth: Optional[int] = 3
-#     is_public: Optional[bool] = True
+class GraphQLToRAGRequest(BaseModel):
+    api_url: str
+    headers: Optional[Dict[str, str]] = None
+    source_name: Optional[str] = None
+    max_depth: Optional[int] = 3
+    is_public: Optional[bool] = True
 
-# class GraphQLToRAGResponse(BaseModel):
-#     task_id: str
-#     status: str
-#     message: str
+class GraphQLToRAGResponse(BaseModel):
+    task_id: str
+    status: str
+    message: str
 
 @router.post("/submit", response_model=QuerySubmissionResponse)
 async def submit_query(
@@ -206,57 +206,89 @@ async def process_audio_query(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(e)}")
 
-# @router.post("/ingest-graphql", response_model=GraphQLToRAGResponse)
-# async def ingest_graphql_data(
-#     request: GraphQLToRAGRequest,
-#     current_user: UserTokenData = Depends(get_current_user)
-# ):
-#     """
-#     Ingest data from a GraphQL API into the RAG knowledge base.
+@router.post("/ingest-graphql", response_model=GraphQLToRAGResponse)
+async def ingest_graphql_data(
+    request: GraphQLToRAGRequest,
+    current_user: UserTokenData = Depends(get_current_user)
+):
+    """
+    Ingest data from a GraphQL API into the RAG knowledge base.
     
-#     Provide a GraphQL API URL and this endpoint will:
-#     1. Extract all available data from the API
-#     2. Process it into searchable documents  
-#     3. Add it to your RAG knowledge base
-#     4. Update the retrievers automatically
+    Provide a GraphQL API URL and this endpoint will:
+    1. Extract all available data from the API
+    2. Process it into searchable documents  
+    3. Add it to your RAG knowledge base
+    4. Update the retrievers automatically
     
-#     The data will then be available for querying through the regular query endpoints.
-#     """
-#     try:
-#         # Validate URL
-#         if not request.api_url.startswith(('http://', 'https://')):
-#             raise HTTPException(status_code=400, detail="API URL must start with http:// or https://")
+    "api_url": "string" ✅ Required
+        Purpose: The GraphQL endpoint URL to extract data from
+        Example: "https://rickandmortyapi.com/graphql"
+        Validation: Must start with http:// or https://
+    "headers": { "additionalProp1": "string", ... } ⚠️ Optional
+        Purpose: HTTP headers for API authentication/authorization
+        Use Cases:
+        Authentication: {"Authorization": "Bearer your-jwt-token"}
+        API Keys: {"X-API-Key": "your-api-key"}
+        Custom headers: {"User-Agent": "YourApp/1.0"}
+        Default: null (no additional headers)
+    "source_name": "string" ⚠️ Optional
+        Purpose: Human-readable name for the data source (used in RAG metadata)
+        Example: "Rick and Morty API", "Company Internal API"
+        Default: Auto-extracted from URL domain (e.g., rickandmortyapi.com)
+        Usage: Appears in RAG document metadata and helps identify source during queries
+    "max_depth": 3 ⚠️ Optional
+        Purpose: Controls how deep the GraphQL schema introspection goes
+        Range: Typically 1-5 (higher = more nested data, longer processing)
+        Default: 3
+        Impact:
+        Depth 1: Only top-level fields
+        Depth 3: Gets relationships and nested objects
+        Depth 5+: Very deep nesting (may hit API limits)
+    "is_public": true ⚠️ Optional
+        Purpose: Whether the extracted RAG documents should be publicly accessible
+        Values:
+        true: Documents visible to all users in the tenant
+        false: Documents only visible to the user who imported them
+        Default: true
+        Impact: Affects RAG retrieval scope during queries
+
+    The data will then be available for querying through the regular query endpoints.
+    """
+    try:
+        # Validate URL
+        if not request.api_url.startswith(('http://', 'https://')):
+            raise HTTPException(status_code=400, detail="API URL must start with http:// or https://")
         
-#         # Auto-generate source name if not provided
-#         source_name = request.source_name
-#         if not source_name:
-#             # Extract domain name from URL as source name
-#             from urllib.parse import urlparse
-#             parsed = urlparse(request.api_url)
-#             source_name = parsed.netloc.replace('www.', '') or "GraphQL API"
+        # Auto-generate source name if not provided
+        source_name = request.source_name
+        if not source_name:
+            # Extract domain name from URL as source name
+            from urllib.parse import urlparse
+            parsed = urlparse(request.api_url)
+            source_name = parsed.netloc.replace('www.', '') or "GraphQL API"
         
-#         # Submit the Celery task
-#         task = celery_app.send_task(
-#             'process_graphql_to_rag',
-#             kwargs={
-#                 'api_url': request.api_url,
-#                 'headers': request.headers,
-#                 'source_name': source_name,
-#                 'max_depth': request.max_depth,
-#                 'tenant_id': str(current_user.tenant_id),
-#                 'user_id': str(current_user.user_id),
-#                 'is_public': request.is_public
-#             }
-#         )
+        # Submit the Celery task
+        task = celery_app.send_task(
+            'process_graphql_to_rag',
+            kwargs={
+                'api_url': request.api_url,
+                'headers': request.headers,
+                'source_name': source_name,
+                'max_depth': request.max_depth,
+                'tenant_id': str(current_user.tenant_id),
+                'user_id': str(current_user.user_id),
+                'is_public': request.is_public
+            }
+        )
         
-#         return GraphQLToRAGResponse(
-#             task_id=task.id,
-#             status="processing",
-#             message=f"GraphQL data ingestion started for {source_name}. Check status endpoint for progress."
-#         )
+        return GraphQLToRAGResponse(
+            task_id=task.id,
+            status="processing",
+            message=f"GraphQL data ingestion started for {source_name}. Check status endpoint for progress."
+        )
         
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"Failed to start GraphQL ingestion: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to start GraphQL ingestion: {str(e)}")
 
 @router.get("/status/{task_id}")
 async def get_task_status(task_id: str):

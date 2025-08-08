@@ -1,5 +1,6 @@
 import asyncio
 import time
+import ssl
 import queue
 import json
 import base64
@@ -115,7 +116,7 @@ class ComprehensiveVoicebotClient:
     """Enhanced voicebot client with comprehensive features and listeners"""
     # replace localhost with 172.17.23.164 (wifi) or 172.17.180.189 (ethernet) 
     
-    def __init__(self, host="localhost", port=8000, tenant_id="cf670545-292c-49cc-af6c-798e7c786070", user_id="f19c393f-a23b-4337-88fa-71ca01733d62"):
+    def __init__(self, host="localhost", port=8443, tenant_id="cf670545-292c-49cc-af6c-798e7c786070", user_id="f19c393f-a23b-4337-88fa-71ca01733d62"):
     
     # for a premium version, you can use the following credentials:
     # def __init__(self, host="localhost", port=8000, 
@@ -129,7 +130,7 @@ class ComprehensiveVoicebotClient:
         self.session_id = None
         
         # WebSocket connection
-        self.websocket_url = f"ws://{host}:{port}/ws/{tenant_id}/{user_id}?device_id={self.device_id}"
+        self.websocket_url = f"wss://{host}:{port}/ws/{tenant_id}/{user_id}?device_id={self.device_id}"
         self.websocket = None
         self.connected = False
         
@@ -192,6 +193,7 @@ class ComprehensiveVoicebotClient:
             'redis_health': self._handle_redis_health,
             'audio_status': self._handle_audio_status,
             'text_response': self._handle_text_response,
+            'query_response': self._handle_text_response,
             'health_check': self._handle_health_check
         }
 
@@ -365,21 +367,29 @@ class ComprehensiveVoicebotClient:
         except Exception as e:
             print(f"⚠️ Error selecting device: {e}. Using default.")
 
-    # Connection management
     async def connect(self):
-        """Connect to WebSocket with retry logic"""
+        """Connect to WebSocket with retry logic and SSL support"""
+        import ssl
+        
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 logger.info(f"🔌 Connecting to {self.websocket_url} (attempt {attempt + 1})")
+                
+                # Create SSL context that accepts self-signed certificates
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                
                 self.websocket = await websockets.connect(
                     self.websocket_url,
                     ping_interval=30,
                     ping_timeout=10,
-                    close_timeout=10
+                    close_timeout=10,
+                    ssl=ssl_context  # This is the key fix
                 )
                 self.connected = True
-                logger.info("✅ Connected to WebSocket")
+                logger.info("✅ Connected to WebSocket with SSL")
                 
                 # Start audio player
                 self.audio_player.start()
@@ -387,11 +397,13 @@ class ComprehensiveVoicebotClient:
                 return True
             except Exception as e:
                 logger.error(f"❌ Connection attempt {attempt + 1} failed: {e}")
+                if "certificate verify failed" in str(e).lower():
+                    logger.error("💡 SSL certificate verification failed - using self-signed certificate")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)  # Exponential backoff
                 
         return False
-    
+
     async def disconnect(self):
         """Disconnect from WebSocket"""
         self.connected = False

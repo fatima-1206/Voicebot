@@ -30,7 +30,7 @@ def process_query_task(self, query_id: str, query: str, tenant_id: str, user_id:
             
             # Notify via WebSocket with session support
             redis_manager.publish_to_session(tenant_id=tenant_id, user_id=user_id, device_id=device_id, session_id=session_id, message={
-                "type": "query_response",
+                "type": "text_response",
                 "query_id": query_id,
                 "query": query,
                 "response": response,

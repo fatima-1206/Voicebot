@@ -13,7 +13,7 @@ import os
 logger = logging.getLogger(__name__)
 
 @celery_app.task(name='process_uploaded_document')
-def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, device_id, session_id, is_public):
+def process_uploaded_document(file_bytes, filename, doc_id, tenant_id, user_id, is_public):
     """Process uploaded document - extract text, create chunks, etc."""
     print(f"🔄 [DOC] Processing: {filename}")
     

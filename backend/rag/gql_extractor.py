@@ -330,22 +330,41 @@ class GraphQLExtractor:
             logger.info(f"Processing field: {field_name}")
             
             try:
-                # Handle fields with required arguments
+                # Handle fields with required arguments - improved detection
                 field_args = field.get('args', [])
                 required_args = []
+                optional_args = []
+                
                 for arg in field_args:
-                    if arg and arg.get('type', {}).get('kind') == 'NON_NULL':
-                        required_args.append(arg.get('name', 'unknown'))
+                    if not arg or not arg.get('name'):
+                        continue
+                        
+                    arg_type = arg.get('type', {})
+                    if arg_type.get('kind') == 'NON_NULL':
+                        required_args.append({
+                            'name': arg.get('name', 'unknown'),
+                            'type': self._get_type_name(arg_type)
+                        })
+                    else:
+                        optional_args.append({
+                            'name': arg.get('name', 'unknown'),
+                            'type': self._get_type_name(arg_type)
+                        })
                 
                 if required_args:
-                    logger.warning(f"Skipping {field_name} - requires arguments: {required_args}")
-                    all_data[field_name] = {"skipped": "requires_arguments", "required_args": required_args}
+                    logger.warning(f"Skipping {field_name} - requires arguments: {[arg['name'] for arg in required_args]}")
+                    all_data[field_name] = {
+                        "skipped": "requires_arguments", 
+                        "required_args": required_args,
+                        "optional_args": optional_args
+                    }
                     continue
                 
                 # Build and execute query for this field
                 query_body = self.build_query_for_field(field, max_depth)
                 if not query_body:
                     logger.warning(f"Could not build query for {field_name}")
+                    all_data[field_name] = {"skipped": "could_not_build_query"}
                     continue
                     
                 query_str = f"query {{ {query_body} }}"
@@ -365,6 +384,21 @@ class GraphQLExtractor:
                 all_data[field_name] = {"error": "extraction_error", "message": str(e)}
                 
         return all_data
+
+    def _get_type_name(self, type_ref: Dict) -> str:
+        """Get the name of a type, unwrapping NON_NULL and LIST wrappers"""
+        if not type_ref:
+            return "Unknown"
+            
+        if type_ref.get('name'):
+            return type_ref['name']
+            
+        if type_ref.get('kind') in ['NON_NULL', 'LIST']:
+            of_type = type_ref.get('ofType')
+            if of_type:
+                return self._get_type_name(of_type)
+                
+        return "Unknown"
 
     def save_to_json(self, data: Dict[str, Any], filename: str = "extracted_data.json"):
         """Save extracted data to JSON file"""

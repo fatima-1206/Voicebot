@@ -329,30 +329,30 @@ def load_documents(include_postgres=True):
     except Exception as e:
         print(f"  -> Failed to load Wikipedia docs: {e}")
 
-    # Urdu QA dataset
-    try:
-        dataset = load_dataset("tydiqa", "primary_task")
-        urdu_qas = [x for x in dataset["train"] if x["language"] == "ur"]
-        urdu_docs = [
-            Document(page_content=qa["context"], metadata={"question": qa["question"], "source": "tydiqa"})
-            for qa in urdu_qas[:1000]
-        ]
-        all_documents.extend(urdu_docs)
-        print(f"  -> Loaded {len(urdu_docs)} Urdu QA docs")
-    except Exception as e:
-        print(f"  -> Failed to load Urdu QA dataset: {e}")
+    # # Urdu QA dataset
+    # try:
+    #     dataset = load_dataset("tydiqa", "primary_task")
+    #     urdu_qas = [x for x in dataset["train"] if x["language"] == "ur"]
+    #     urdu_docs = [
+    #         Document(page_content=qa["context"], metadata={"question": qa["question"], "source": "tydiqa"})
+    #         for qa in urdu_qas[:1000]
+    #     ]
+    #     all_documents.extend(urdu_docs)
+    #     print(f"  -> Loaded {len(urdu_docs)} Urdu QA docs")
+    # except Exception as e:
+    #     print(f"  -> Failed to load Urdu QA dataset: {e}")
     
-    try:
-        dataset = load_dataset("tydiqa", "primary_task")
-        english_qas = [x for x in dataset["train"] if x["language"] == "en"]
-        english_docs = [
-            Document(page_content=qa["context"], metadata={"question": qa["question"], "source": "tydiqa"})
-            for qa in english_qas[:1000]
-        ]
-        all_documents.extend(english_docs)
-        print(f"  -> Loaded {len(english_docs)} English QA docs")
-    except Exception as e:
-        print(f"  -> Failed to load English QA dataset: {e}")
+    # try:
+    #     dataset = load_dataset("tydiqa", "primary_task")
+    #     english_qas = [x for x in dataset["train"] if x["language"] == "en"]
+    #     english_docs = [
+    #         Document(page_content=qa["context"], metadata={"question": qa["question"], "source": "tydiqa"})
+    #         for qa in english_qas[:1000]
+    #     ]
+    #     all_documents.extend(english_docs)
+    #     print(f"  -> Loaded {len(english_docs)} English QA docs")
+    # except Exception as e:
+    #     print(f"  -> Failed to load English QA dataset: {e}")
 
     if all_documents:
         save_documents_cache()

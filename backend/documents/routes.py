@@ -70,6 +70,8 @@ async def upload_document(
         doc_id=str(doc_id),
         tenant_id=str(current_user.tenant_id),
         user_id=str(current_user.user_id),  # Add user_id
+        # device_id= str,
+        # session_id=str,
         is_public=is_public  # Add is_public
     )
 

@@ -20,7 +20,7 @@ passlib
 
 
 protobuf 
-nemo_toolkit[asr]
+# nemo_toolkit[asr]
 silero
 silero_vad
 librosa

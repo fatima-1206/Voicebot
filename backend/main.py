@@ -278,63 +278,72 @@ async def handle_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str
 
 # Update all handler functions to include device_id parameter
 async def handle_continuous_audio_stream(websocket: WebSocket, tenant_id: str, user_id: str, data: dict, key: str, session_id: str, device_id: str = None):
-    """Handle continuous audio stream with session-specific buffer management"""
+    """Handle continuous audio stream - process each chunk independently, no buffer logic"""
     audio_chunk_base64 = data.get("audio")
     if not audio_chunk_base64:
         return
-    
+
     try:
         audio_bytes = base64.b64decode(audio_chunk_base64)
-        audio_buffer_manager.append_audio(key, audio_bytes)
         
-        # Only process if we have enough audio data
-        current_buffer = audio_buffer_manager.get_buffer(key)
-        min_process_size = 16000  # 1 second at 16kHz
-        
-        if len(current_buffer) >= min_process_size:
-            # Get buffer contents and clear it
-            buffer_data = audio_buffer_manager.get_and_clear_buffer(key)
-            
-            # Apply VAD to detect speech segments
-            from backend.workers.stt_tasks import get_speech_timestamps
-            audio_data = bytes_to_numpy_audio(audio_bytes)
-            if audio_data is None or len(audio_data) == 0:
-                return {"status": "no_audio"}
-            
-            # Convert to tensor for VAD
-            audio_tensor = torch.from_numpy(audio_data).float()
-            audio_tensor = torch.clamp(audio_tensor, -1.0, 1.0)
-            
-            speech_timestamps = get_speech_timestamps(
-                audio_tensor, 
-                vad_model, 
-                sampling_rate=sample_rate,
-                threshold=0.2,
-                min_speech_duration_ms=200,
-                min_silence_duration_ms=100,
-                speech_pad_ms=50
-            )
+        # Convert bytes to numpy audio
+        audio_data = bytes_to_numpy_audio(audio_bytes)
+        if audio_data is None or len(audio_data) == 0:
+            await websocket.send_json({
+                "type": "error",
+                "message": "No valid audio data received",
+                "session_id": session_id,
+                "device_id": device_id
+            })
+            return
 
-            int16_audio = np.clip(audio_tensor.numpy(), -1.0, 1.0)
-            int16_audio = (int16_audio * 32767).astype(np.int16)
-            audio_bytes = int16_audio.tobytes()
-            
-            from backend.workers.stt_tasks import process_continuous_audio_task
-            process_continuous_audio_task.delay(
-                speech_bytes=audio_bytes,
-                speech_timestamps=speech_timestamps,
-                user_id=user_id,
-                tenant_id=tenant_id,
-                device_id=device_id,
-                session_id=session_id,  # Pass session_id for complete isolation
-                buffer_key=key,
-                tts_language=data.get("tts_language", "en"),
-                voice=data.get("voice", "Fritz-PlayAI"),
-                auto_respond=data.get("auto_respond", True),
-                chunk_id=data.get("chunk_id", str(uuid4())),
-                use_rag=data.get("rag", True)
-            )
-    
+        # Convert to tensor for VAD
+        audio_tensor = torch.from_numpy(audio_data).float()
+        audio_tensor = torch.clamp(audio_tensor, -1.0, 1.0)
+
+        # Apply VAD to detect speech segments
+        from backend.workers.stt_tasks import get_speech_timestamps
+        speech_timestamps = get_speech_timestamps(
+            audio_tensor, 
+            vad_model, 
+            sampling_rate=sample_rate,
+            threshold=0.2,
+            min_speech_duration_ms=200,
+            min_silence_duration_ms=100,
+            speech_pad_ms=50
+        )
+
+        # Convert audio to int16 bytes
+        int16_audio = np.clip(audio_tensor.numpy(), -1.0, 1.0)
+        int16_audio = (int16_audio * 32767).astype(np.int16)
+        processed_audio_bytes = int16_audio.tobytes()
+
+        # Submit chunk for processing (no buffer involved)
+        from backend.workers.stt_tasks import process_continuous_audio_task
+        process_continuous_audio_task.delay(
+            speech_bytes=processed_audio_bytes,
+            speech_timestamps=speech_timestamps,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            device_id=device_id,
+            session_id=session_id,
+            buffer_key=key,
+            tts_language=data.get("tts_language", "en"),
+            voice=data.get("voice", "Fritz-PlayAI"),
+            auto_respond=data.get("auto_respond", True),
+            chunk_id=data.get("chunk_id", str(uuid4())),
+            use_rag=data.get("rag", True)
+        )
+
+        # Optionally send acknowledgment
+        await websocket.send_json({
+            "type": "continuous_audio_chunk_processed",
+            "chunk_id": data.get("chunk_id", ""),
+            "session_id": session_id,
+            "device_id": device_id,
+            "speech_segments_processed": len(speech_timestamps)
+        })
+
     except Exception as e:
         await websocket.send_json({
             "type": "error",

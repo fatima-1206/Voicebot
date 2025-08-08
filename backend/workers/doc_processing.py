@@ -220,8 +220,9 @@ def process_graphql_to_rag(
         print(f"🔄 [GRAPHQL-RAG] Saving processed documents to files...")
         
         try:
+            project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             # Save to knowledge base directory
-            knowledge_base_dir = "/home/genesys/voicebot/Apollo-Voicebot/backend/rag/knowledge_base"
+            knowledge_base_dir = project_dir / "rag/knowledge_base"
             os.makedirs(knowledge_base_dir, exist_ok=True)
             
             # Save JSON version

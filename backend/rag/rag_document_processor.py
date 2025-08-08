@@ -589,9 +589,12 @@ class RAGDocumentProcessor:
 
 def main():
     parser = argparse.ArgumentParser(description='Process GraphQL extracted data for RAG ingestion')
+    project_dir = Path(__file__).resolve().parent.parent
     parser.add_argument('input_file', help='Path to the extracted GraphQL data JSON file')
-    parser.add_argument('--output', '-o', default='/home/genesys/voicebot/Apollo-Voicebot/backend/rag/knowledge_base/rag_documents.json', help='Output JSON file for RAG documents')
-    parser.add_argument('--text-dir', default='backend/rag/knowledge_base/', help='Directory for individual text files')
+
+    parser.add_argument('--output', '-o', default=str(project_dir / 'backend/rag/knowledge_base/rag_documents.json'), help='Output JSON file for RAG documents')
+
+    parser.add_argument('--text-dir', default=str(project_dir / 'backend/rag/knowledge_base/rag_texts'), help='Directory for individual text files')
     parser.add_argument('--source-name', default='GraphQL API', help='Name of the data source')
     
     args = parser.parse_args()

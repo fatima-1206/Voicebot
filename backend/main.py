@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Voicebot API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Use ["*"] to allow all origins (not recommended in production)
+    allow_origins=["https://172.17.180.189:8443", "https://111.68.96.71:8443", "https://genesys-work.vercel.app"],  # Use ["*"] to allow all origins (not recommended in production)
     allow_credentials=True,
     allow_methods=["*"],    # Or restrict to specific methods like ["GET", "POST"]
     allow_headers=["*"],    # Or restrict headers if needed
